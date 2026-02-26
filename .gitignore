@@ -1,0 +1,16 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Unit test / coverage reports
+.coverage
+.coverage.*
+coverage.xml

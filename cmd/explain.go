@@ -49,7 +49,17 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 		rows, err := queryRows(db,
 			fmt.Sprintf("SELECT * FROM reasons WHERE %s ORDER BY ts DESC", where),
 			params...)
-		if err != nil || len(rows) == 0 {
+		if err != nil {
+			fmt.Printf("No reasons found for %s\n", rel)
+			return
+		}
+
+		// Post-filter by precise changed lines when available
+		if line != "" {
+			rows = filterByPreciseLines(rows, line)
+		}
+
+		if len(rows) == 0 {
 			loc := ""
 			if line != "" {
 				loc = " at line " + line
@@ -142,7 +152,9 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 	}
 
 	parts = append(parts, fmt.Sprintf("File: %s", row.File))
-	if row.LineStart != nil {
+	if row.ChangedLines != "" {
+		parts = append(parts, fmt.Sprintf("Lines: %s", row.ChangedLines))
+	} else if row.LineStart != nil {
 		if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
 			parts = append(parts, fmt.Sprintf("Lines: %d-%d", *row.LineStart, *row.LineEnd))
 		} else {

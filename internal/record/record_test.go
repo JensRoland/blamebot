@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/jensroland/git-blamebot/internal/lineset"
 )
 
 func TestContentHash(t *testing.T) {
@@ -75,13 +77,10 @@ func TestRelativizePath(t *testing.T) {
 }
 
 func TestRecordJSONSerialization(t *testing.T) {
-	five := NewInt(5)
-	seven := NewInt(7)
-
 	rec := Record{
 		Ts:          "2025-01-01T00:00:00Z",
 		File:        "src/main.go",
-		Lines:       [2]NullableInt{five, seven},
+		Lines:       lineset.New(5, 6, 7),
 		ContentHash: "abc123def456789a",
 		Prompt:      "add logging",
 		Reason:      "",
@@ -97,31 +96,76 @@ func TestRecordJSONSerialization(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify it's compact (no spaces after separators)
 	s := string(b)
+
+	// Verify compact JSON (no spaces after separators)
 	if strings.Contains(s, ": ") || strings.Contains(s, ", ") {
 		t.Errorf("JSON should be compact, got: %s", s)
 	}
 
-	// Verify lines serializes correctly
-	if !strings.Contains(s, `"lines":[5,7]`) {
-		t.Errorf("lines should serialize as [5,7], got: %s", s)
+	// Verify lines serializes as compact string notation
+	if !strings.Contains(s, `"lines":"5-7"`) {
+		t.Errorf("lines should serialize as \"5-7\", got: %s", s)
 	}
 
-	// Verify null lines
+	// Verify null lines (empty LineSet)
 	recNull := Record{Ts: "2025-01-01T00:00:00Z", File: "test.go"}
 	b2, _ := json.Marshal(recNull)
-	if !strings.Contains(string(b2), `"lines":[null,null]`) {
-		t.Errorf("null lines should serialize as [null,null], got: %s", string(b2))
+	if !strings.Contains(string(b2), `"lines":null`) {
+		t.Errorf("empty lines should serialize as null, got: %s", string(b2))
 	}
 
-	// Verify field order matches Python's dict order
-	var m map[string]json.RawMessage
-	json.Unmarshal(b, &m)
-	keys := make([]string, 0, len(m))
-	// json.Marshal uses struct field order, so check that ts comes first
+	// Verify non-contiguous lines
+	recScattered := Record{
+		Ts:    "2025-01-01T00:00:00Z",
+		File:  "test.go",
+		Lines: lineset.New(5, 7, 8, 12),
+	}
+	b3, _ := json.Marshal(recScattered)
+	if !strings.Contains(string(b3), `"lines":"5,7-8,12"`) {
+		t.Errorf("scattered lines should serialize as \"5,7-8,12\", got: %s", string(b3))
+	}
+
+	// Verify field order (ts first)
 	if !strings.HasPrefix(s, `{"ts":`) {
 		t.Errorf("expected ts to be first field, got: %s", s[:30])
 	}
-	_ = keys
+}
+
+func TestRecordJSONDeserialization_Legacy(t *testing.T) {
+	// Old format with [start, end] array
+	jsonStr := `{"ts":"2025-01-01T00:00:00Z","file":"test.go","lines":[5,7],"content_hash":"","prompt":"","reason":"","change":"","tool":"","author":"","session":"","trace":""}`
+	var rec Record
+	err := json.Unmarshal([]byte(jsonStr), &rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// [5,7] legacy format means range 5-7
+	if rec.Lines.Min() != 5 || rec.Lines.Max() != 7 || rec.Lines.Len() != 3 {
+		t.Errorf("legacy [5,7] should produce range 5-7 (3 lines), got %s (len %d)", rec.Lines.String(), rec.Lines.Len())
+	}
+}
+
+func TestRecordJSONDeserialization_LegacyNull(t *testing.T) {
+	jsonStr := `{"ts":"2025-01-01T00:00:00Z","file":"test.go","lines":[null,null],"content_hash":"","prompt":"","reason":"","change":"","tool":"","author":"","session":"","trace":""}`
+	var rec Record
+	err := json.Unmarshal([]byte(jsonStr), &rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.Lines.IsEmpty() {
+		t.Errorf("legacy [null,null] should be empty, got %s", rec.Lines.String())
+	}
+}
+
+func TestRecordJSONDeserialization_New(t *testing.T) {
+	jsonStr := `{"ts":"2025-01-01T00:00:00Z","file":"test.go","lines":"5,7-8,12","content_hash":"","prompt":"","reason":"","change":"","tool":"","author":"","session":"","trace":""}`
+	var rec Record
+	err := json.Unmarshal([]byte(jsonStr), &rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Lines.String() != "5,7-8,12" {
+		t.Errorf("new format should produce 5,7-8,12, got %s", rec.Lines.String())
+	}
 }

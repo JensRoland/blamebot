@@ -10,6 +10,7 @@ import (
 
 	"github.com/jensroland/git-blamebot/internal/format"
 	"github.com/jensroland/git-blamebot/internal/index"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 )
 
 func relativePath(filePath, projectRoot string) string {
@@ -44,17 +45,23 @@ func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput
 	}
 
 	where := strings.Join(conditions, " AND ")
-	limit := ""
-	if line != "" {
-		limit = " LIMIT 1"
-	}
 
 	rows, err := queryRows(db,
-		fmt.Sprintf("SELECT * FROM reasons WHERE %s ORDER BY ts DESC%s", where, limit),
+		fmt.Sprintf("SELECT * FROM reasons WHERE %s ORDER BY ts DESC", where),
 		params...)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
+	}
+
+	// Post-filter by precise changed lines when available
+	if line != "" {
+		rows = filterByPreciseLines(rows, line)
+	}
+
+	// When querying a specific line, only show the most recent match
+	if line != "" && len(rows) > 1 {
+		rows = rows[:1]
 	}
 
 	if jsonOutput {
@@ -75,6 +82,38 @@ func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput
 		fmt.Println(format.FormatReason(row, projectRoot, verbose))
 		fmt.Println()
 	}
+}
+
+// filterByPreciseLines refines SQL bounding-range results using the precise
+// changed_lines field when available.
+func filterByPreciseLines(rows []*index.ReasonRow, line string) []*index.ReasonRow {
+	var filtered []*index.ReasonRow
+	for _, row := range rows {
+		if row.ChangedLines == "" {
+			// Legacy record without precise lines — keep it
+			filtered = append(filtered, row)
+			continue
+		}
+		ls, err := lineset.FromString(row.ChangedLines)
+		if err != nil {
+			filtered = append(filtered, row)
+			continue
+		}
+		if strings.Contains(line, ":") {
+			parts := strings.SplitN(line, ":", 2)
+			start, _ := strconv.Atoi(parts[0])
+			end, _ := strconv.Atoi(parts[1])
+			if ls.Overlaps(start, end) {
+				filtered = append(filtered, row)
+			}
+		} else {
+			lineNum, _ := strconv.Atoi(line)
+			if ls.Contains(lineNum) {
+				filtered = append(filtered, row)
+			}
+		}
+	}
+	return filtered
 }
 
 func cmdGrep(db *sql.DB, pattern, projectRoot string, verbose, jsonOutput bool) {

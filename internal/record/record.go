@@ -2,51 +2,26 @@ package record
 
 import (
 	"crypto/sha256"
-	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/jensroland/git-blamebot/internal/lineset"
 )
-
-// NullableInt serializes as a JSON number or null.
-type NullableInt struct {
-	Value int
-	Valid bool
-}
-
-func NewInt(v int) NullableInt {
-	return NullableInt{Value: v, Valid: true}
-}
-
-func (n NullableInt) MarshalJSON() ([]byte, error) {
-	if !n.Valid {
-		return []byte("null"), nil
-	}
-	return json.Marshal(n.Value)
-}
-
-func (n *NullableInt) UnmarshalJSON(data []byte) error {
-	if string(data) == "null" {
-		n.Valid = false
-		return nil
-	}
-	n.Valid = true
-	return json.Unmarshal(data, &n.Value)
-}
 
 // Record is a single blamebot JSONL entry.
 type Record struct {
-	Ts          string        `json:"ts"`
-	File        string        `json:"file"`
-	Lines       [2]NullableInt `json:"lines"`
-	ContentHash string        `json:"content_hash"`
-	Prompt      string        `json:"prompt"`
-	Reason      string        `json:"reason"`
-	Change      string        `json:"change"`
-	Tool        string        `json:"tool"`
-	Author      string        `json:"author"`
-	Session     string        `json:"session"`
-	Trace       string        `json:"trace"`
+	Ts          string         `json:"ts"`
+	File        string         `json:"file"`
+	Lines       lineset.LineSet `json:"lines"`
+	ContentHash string         `json:"content_hash"`
+	Prompt      string         `json:"prompt"`
+	Reason      string         `json:"reason"`
+	Change      string         `json:"change"`
+	Tool        string         `json:"tool"`
+	Author      string         `json:"author"`
+	Session     string         `json:"session"`
+	Trace       string         `json:"trace"`
 }
 
 // ContentHash produces a 16-char hex hash of whitespace-normalized text.

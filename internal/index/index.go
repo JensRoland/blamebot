@@ -12,32 +12,34 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
 )
 
 // ReasonRow mirrors a row from the reasons table.
 type ReasonRow struct {
-	ID          int
-	File        string
-	LineStart   *int
-	LineEnd     *int
-	ContentHash string
-	Ts          string
-	Prompt      string
-	Reason      string
-	Change      string
-	Tool        string
-	Author      string
-	Session     string
-	Trace       string
-	SourceFile  string
+	ID           int
+	File         string
+	LineStart    *int
+	LineEnd      *int
+	ChangedLines string
+	ContentHash  string
+	Ts           string
+	Prompt       string
+	Reason       string
+	Change       string
+	Tool         string
+	Author       string
+	Session      string
+	Trace        string
+	SourceFile   string
 }
 
 // ScanRow scans a *sql.Rows into a ReasonRow.
 func ScanRow(rows *sql.Rows) (*ReasonRow, error) {
 	r := &ReasonRow{}
 	err := rows.Scan(
-		&r.ID, &r.File, &r.LineStart, &r.LineEnd, &r.ContentHash,
+		&r.ID, &r.File, &r.LineStart, &r.LineEnd, &r.ChangedLines, &r.ContentHash,
 		&r.Ts, &r.Prompt, &r.Reason, &r.Change, &r.Tool,
 		&r.Author, &r.Session, &r.Trace, &r.SourceFile,
 	)
@@ -88,6 +90,7 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 			file TEXT NOT NULL,
 			line_start INTEGER,
 			line_end INTEGER,
+			changed_lines TEXT,
 			content_hash TEXT,
 			ts TEXT NOT NULL,
 			prompt TEXT,
@@ -136,9 +139,9 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 
 		stmt, err := tx.Prepare(`
 			INSERT INTO reasons
-			(file, line_start, line_end, content_hash, ts,
+			(file, line_start, line_end, changed_lines, content_hash, ts,
 			 prompt, reason, change, tool, author, session, trace, source_file)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`)
 		if err != nil {
 			tx.Rollback()
@@ -173,17 +176,31 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 				}
 
 				var lineStart, lineEnd *int
-				if lines, ok := rec["lines"].([]interface{}); ok {
-					if len(lines) > 0 {
-						if v, ok := lines[0].(float64); ok {
-							n := int(v)
-							lineStart = &n
+				var changedLines string
+
+				switch v := rec["lines"].(type) {
+				case string:
+					// New format: compact notation like "5,7-8,12"
+					changedLines = v
+					ls, err := lineset.FromString(v)
+					if err == nil && !ls.IsEmpty() {
+						min := ls.Min()
+						max := ls.Max()
+						lineStart = &min
+						lineEnd = &max
+					}
+				case []interface{}:
+					// Legacy format: [start, end] or [null, null]
+					if len(v) > 0 {
+						if n, ok := v[0].(float64); ok {
+							i := int(n)
+							lineStart = &i
 						}
 					}
-					if len(lines) > 1 {
-						if v, ok := lines[1].(float64); ok {
-							n := int(v)
-							lineEnd = &n
+					if len(v) > 1 {
+						if n, ok := v[1].(float64); ok {
+							i := int(n)
+							lineEnd = &i
 						}
 					}
 				}
@@ -197,6 +214,7 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 					getStr(rec, "file"),
 					lineStart,
 					lineEnd,
+					changedLines,
 					getStr(rec, "content_hash"),
 					getStr(rec, "ts"),
 					getStr(rec, "prompt"),

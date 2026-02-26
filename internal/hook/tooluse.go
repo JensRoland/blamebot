@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jensroland/git-blamebot/internal/debug"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
 	"github.com/jensroland/git-blamebot/internal/record"
 )
@@ -17,8 +18,7 @@ import (
 // editInfo holds extracted edit details from a tool payload.
 type editInfo struct {
 	File        string
-	LineStart   *int
-	LineEnd     *int
+	Lines       lineset.LineSet
 	ContentHash string
 	Change      string
 }
@@ -123,6 +123,7 @@ func HandlePostToolUse(r io.Reader) error {
 		rec := record.Record{
 			Ts:          now,
 			File:        edit.File,
+			Lines:       edit.Lines,
 			ContentHash: edit.ContentHash,
 			Prompt:      ps.Prompt,
 			Reason:      "",
@@ -131,12 +132,6 @@ func HandlePostToolUse(r io.Reader) error {
 			Author:      author,
 			Session:     sessionID,
 			Trace:       traceRef,
-		}
-		if edit.LineStart != nil {
-			rec.Lines[0] = record.NewInt(*edit.LineStart)
-		}
-		if edit.LineEnd != nil {
-			rec.Lines[1] = record.NewInt(*edit.LineEnd)
 		}
 
 		b, err := json.Marshal(rec)
@@ -167,11 +162,10 @@ func extractEdits(data map[string]interface{}, projectDir string) []editInfo {
 	case "Edit":
 		oldStr := getString(toolInput, "old_string")
 		newStr := getString(toolInput, "new_string")
-		lineStart, lineEnd := extractLineNumbers(toolResponse)
+		lines := editChangedLines(oldStr, newStr, toolResponse)
 		return []editInfo{{
 			File:        filePath,
-			LineStart:   lineStart,
-			LineEnd:     lineEnd,
+			Lines:       lines,
 			ContentHash: record.ContentHash(newStr),
 			Change:      record.CompactChangeSummary(oldStr, newStr),
 		}}
@@ -181,20 +175,16 @@ func extractEdits(data map[string]interface{}, projectDir string) []editInfo {
 		if content == "" {
 			content = getString(toolInput, "file_text")
 		}
-		var nLines *int
+		var lines lineset.LineSet
+		change := "created file"
 		if content != "" {
 			n := strings.Count(content, "\n") + 1
-			nLines = &n
-		}
-		one := 1
-		change := "created file"
-		if nLines != nil {
-			change = fmt.Sprintf("created file (%d lines)", *nLines)
+			lines = lineset.FromRange(1, n)
+			change = fmt.Sprintf("created file (%d lines)", n)
 		}
 		return []editInfo{{
 			File:        filePath,
-			LineStart:   &one,
-			LineEnd:     nLines,
+			Lines:       lines,
 			ContentHash: record.ContentHash(content[:min(len(content), 500)]),
 			Change:      change,
 		}}
@@ -215,17 +205,13 @@ func extractEdits(data map[string]interface{}, projectDir string) []editInfo {
 			newStr := getString(edit, "new_string")
 			oldStr := getString(edit, "old_string")
 
-			var start, end *int
+			// Build a single-patch toolResponse for this sub-edit
+			var lines lineset.LineSet
 			if i < len(patches) {
-				p, ok := patches[i].(map[string]interface{})
-				if ok {
-					if s, ok := getIntPtr(p, "newStart"); ok {
-						start = &s
-						nLines := getIntOr(p, "newLines", 1)
-						e := s + max(nLines-1, 0)
-						end = &e
-					}
+				subResp := map[string]interface{}{
+					"structuredPatch": []interface{}{patches[i]},
 				}
+				lines = editChangedLines(oldStr, newStr, subResp)
 			}
 
 			editFilePath := getString(edit, "file_path")
@@ -237,8 +223,7 @@ func extractEdits(data map[string]interface{}, projectDir string) []editInfo {
 
 			edits = append(edits, editInfo{
 				File:        editFilePath,
-				LineStart:   start,
-				LineEnd:     end,
+				Lines:       lines,
 				ContentHash: record.ContentHash(newStr),
 				Change:      record.CompactChangeSummary(oldStr, newStr),
 			})
@@ -257,26 +242,25 @@ func extractEdits(data map[string]interface{}, projectDir string) []editInfo {
 	}
 }
 
-// extractLineNumbers reads line numbers from structuredPatch.
-func extractLineNumbers(toolResponse map[string]interface{}) (*int, *int) {
+// editChangedLines extracts the newStart from the structuredPatch, then
+// diffs oldStr vs newStr to find which lines actually changed.
+func editChangedLines(oldStr, newStr string, toolResponse map[string]interface{}) lineset.LineSet {
 	patches := getArray(toolResponse, "structuredPatch")
 	if len(patches) == 0 {
-		return nil, nil
+		return lineset.LineSet{}
 	}
 
 	patch, ok := patches[0].(map[string]interface{})
 	if !ok {
-		return nil, nil
+		return lineset.LineSet{}
 	}
 
-	start, ok := getIntPtr(patch, "newStart")
+	newStart, ok := getIntPtr(patch, "newStart")
 	if !ok {
-		return nil, nil
+		return lineset.LineSet{}
 	}
 
-	nLines := getIntOr(patch, "newLines", 0)
-	end := start + max(nLines-1, 0)
-	return &start, &end
+	return lineset.ChangedLines(oldStr, newStr, newStart)
 }
 
 // Helper functions for safe map access.

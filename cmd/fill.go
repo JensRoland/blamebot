@@ -15,13 +15,14 @@ import (
 )
 
 type fillEdit struct {
-	ID         int
-	File       string
-	LineStart  *int
-	LineEnd    *int
-	Change     string
-	SourceFile string
-	RecordIdx  int
+	ID           int
+	File         string
+	LineStart    *int
+	LineEnd      *int
+	ChangedLines string
+	Change       string
+	SourceFile   string
+	RecordIdx    int
 }
 
 func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
@@ -99,17 +100,22 @@ func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
 			editID++
 
 			var lineStart, lineEnd *int
-			if lines, ok := rec["lines"].([]interface{}); ok {
-				if len(lines) > 0 {
-					if v, ok := lines[0].(float64); ok {
-						n := int(v)
-						lineStart = &n
+			var changedLines string
+
+			switch v := rec["lines"].(type) {
+			case string:
+				changedLines = v
+			case []interface{}:
+				if len(v) > 0 {
+					if n, ok := v[0].(float64); ok {
+						i := int(n)
+						lineStart = &i
 					}
 				}
-				if len(lines) > 1 {
-					if v, ok := lines[1].(float64); ok {
-						n := int(v)
-						lineEnd = &n
+				if len(v) > 1 {
+					if n, ok := v[1].(float64); ok {
+						i := int(n)
+						lineEnd = &i
 					}
 				}
 			}
@@ -123,13 +129,14 @@ func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
 				groups[transcriptPath] = g
 			}
 			g.edits = append(g.edits, fillEdit{
-				ID:         editID,
-				File:       file,
-				LineStart:  lineStart,
-				LineEnd:    lineEnd,
-				Change:     change,
-				SourceFile: relPath,
-				RecordIdx:  i,
+				ID:           editID,
+				File:         file,
+				LineStart:    lineStart,
+				LineEnd:      lineEnd,
+				ChangedLines: changedLines,
+				Change:       change,
+				SourceFile:   relPath,
+				RecordIdx:    i,
 			})
 		}
 	}
@@ -309,7 +316,9 @@ func buildFillPrompt(sessionPrompts []string, edits []fillEdit) string {
 	parts = append(parts, "", "Edits:")
 	for _, edit := range edits {
 		lines := ""
-		if edit.LineStart != nil {
+		if edit.ChangedLines != "" {
+			lines = " L" + edit.ChangedLines
+		} else if edit.LineStart != nil {
 			if edit.LineEnd != nil && *edit.LineEnd != *edit.LineStart {
 				lines = fmt.Sprintf(" L%d-%d", *edit.LineStart, *edit.LineEnd)
 			} else {

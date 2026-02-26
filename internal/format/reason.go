@@ -59,9 +59,11 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool) string
 	}
 	author := row.Author
 
-	// Line range display
+	// Line display (prefer precise changed lines over bounding range)
 	var lines string
-	if row.LineStart != nil {
+	if row.ChangedLines != "" {
+		lines = "L" + row.ChangedLines
+	} else if row.LineStart != nil {
 		if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
 			lines = fmt.Sprintf("L%d-%d", *row.LineStart, *row.LineEnd)
 		} else {
@@ -166,9 +168,15 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool) string
 
 // RowToJSON converts a ReasonRow to a JSON-serializable map.
 func RowToJSON(row *index.ReasonRow, projectRoot string) map[string]interface{} {
+	var linesVal interface{}
+	if row.ChangedLines != "" {
+		linesVal = row.ChangedLines
+	} else {
+		linesVal = [2]interface{}{row.LineStart, row.LineEnd}
+	}
 	d := map[string]interface{}{
 		"file":         row.File,
-		"lines":        [2]interface{}{row.LineStart, row.LineEnd},
+		"lines":        linesVal,
 		"ts":           row.Ts,
 		"prompt":       row.Prompt,
 		"reason":       row.Reason,

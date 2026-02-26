@@ -25,33 +25,34 @@ Each record captures three layers of "why":
 ### One-time global install
 
 ```bash
-sh setup.sh install
+make install
 ```
 
-Installs `~/.local/bin/git-blamebot` (CLI) and `~/.blamebot/hooks/` (hook scripts). Automatically configures the Claude Code hooks in `~/.claude/settings.json`.
+Builds the `git-blamebot` binary, installs it to `~/.local/bin/`, and configures Claude Code hooks in `~/.claude/settings.json`.
 
 ### Per-repo init
 
 ```bash
-cd your-project && /path/to/setup.sh init
+cd your-project && git-blamebot enable
 git add .blamebot && git commit -m 'Initialize blamebot tracking'
 ```
 
-This creates the `.blamebot/` tracking directory and installs a pre-commit hook that auto-fills reasons when you commit.
+Creates the `.blamebot/` tracking directory and installs a pre-commit hook that auto-fills reasons when you commit.
 
 ## CLI usage
 
 ```bash
-git blamebot src/sync/worker.ts           # all reasons for a file
-git blamebot -L 42 src/sync/worker.ts     # specific line
-git blamebot -L 10:20 src/sync/worker.ts  # line range
+git blamebot src/main.go                  # all reasons for a file
+git blamebot src/main.go -L 42            # most recent reason for a line
+git blamebot -L 10:20 src/main.go         # line range
 git blamebot --grep "timeout"             # search prompts, reasons & changes
 git blamebot --since 2025-02-17           # filter by date
 git blamebot --author jens                # filter by author
-git blamebot --trace 1                    # show full reasoning trace
-git blamebot --explain src/sync/worker.ts # deep explanation via Sonnet
+git blamebot --trace 7                    # show full reasoning trace for record #7
+git blamebot --explain src/main.go -L 42  # deep explanation via Sonnet
+git blamebot --explain 7                  # explain a specific record by ID
 git blamebot --stats                      # summary statistics
-git blamebot -v src/sync/worker.ts        # verbose: diff, hashes, sessions, git blame
+git blamebot -v src/main.go               # verbose: diff, hashes, sessions, git blame
 ```
 
 ### Maintenance
@@ -60,7 +61,7 @@ git blamebot -v src/sync/worker.ts        # verbose: diff, hashes, sessions, git
 git blamebot --fill-reasons               # fill empty reasons in staged JSONL (runs automatically via pre-commit)
 git blamebot --fill-reasons --dry-run     # preview what would be generated
 git blamebot --rebuild                    # force SQLite index rebuild
-git blamebot --uninit                     # remove tracking from this repo
+git-blamebot disable                      # remove tracking from this repo
 ```
 
 ## Debugging
@@ -73,9 +74,8 @@ git blamebot --dump-payload     # last raw payloads
 
 ## File layout
 
-```sh
-~/.local/bin/git-blamebot        # CLI (global, works as `git blamebot`)
-~/.blamebot/hooks/               # hook scripts (global)
+```
+~/.local/bin/git-blamebot        # single binary (CLI + hooks)
 
 <repo>/.blamebot/                # COMMITTED — travels with repo
 ├── log/*.jsonl                  # one file per prompt session
@@ -113,6 +113,16 @@ The `reason` field starts empty and is filled by `--fill-reasons` at commit time
 
 Each prompt session writes to its own uniquely-named JSONL file, so two developers (or branches) never touch the same file. Merges are trivial — just new files appearing.
 
+## Building from source
+
+```bash
+make build    # build to dist/git-blamebot
+make test     # run tests
+make install  # build + install + configure hooks
+```
+
+Requires Go 1.22+. No CGO — the binary is fully static and cross-compilable.
+
 ## Future ideas
 
-See [FUTURE_WORK.md](FUTURE_WORK.md) for a prioritized list of potential improvements and features.
+See [FUTURE_WORK.md](FUTURE_WORK.md) for potential improvements and features.

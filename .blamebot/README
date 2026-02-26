@@ -1,0 +1,6 @@
+This directory is maintained by blamebot.
+It tracks the prompts and reasoning behind AI-authored code edits.
+See: https://github.com/jensroland/git-blamebot
+
+JSONL files in log/ are append-only and merge cleanly across branches.
+Do not edit these files manually.

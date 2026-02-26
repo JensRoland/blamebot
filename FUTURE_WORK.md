@@ -47,32 +47,11 @@ This is worth doing even if we only add one more agent. The refactoring itself w
 
 Note: The OpenAI Codex team are working on adding hooks: <https://github.com/openai/codex/issues/2109#issuecomment-3946505571>
 
-## Rewrite in Go
+## ~~Rewrite in Go~~
 
-**Status**: Worth doing if the project grows
+**Status**: Done
 
-The current stack is Python (CLI + hooks) and Bash (setup). This works but has friction:
-
-- Requires Python 3 on the user's machine
-- No single-binary distribution (can't `brew install`)
-- Hook startup time matters — Python's ~100ms cold start adds up across many tool calls
-- Shell quoting / cross-platform issues in `setup.sh`
-
-A Go rewrite would give us:
-
-- Single static binary, cross-compiled for macOS/Linux/Windows
-- ~5ms hook startup time
-- `brew tap` / `go install` distribution
-- Easier to test (Go's testing stdlib vs. ad-hoc Python scripts)
-
-**Migration path**:
-
-1. Rewrite hooks first (they're small and performance-sensitive)
-2. Rewrite CLI (larger but straightforward — SQLite via `modernc.org/sqlite`, no CGO)
-3. Replace `setup.sh` with `git-blamebot enable` / `git-blamebot disable` subcommands
-4. Keep JSONL + SQLite formats identical so the Go version can read existing data
-
-**Risk**: Losing the ability to quickly prototype. Python is faster to iterate on. Could defer this until the feature set stabilizes.
+Rewritten as a single Go binary. Hooks, CLI, and setup are all handled by `git-blamebot` subcommands. JSONL and SQLite formats are backwards-compatible with existing data.
 
 ## VS Code extension
 

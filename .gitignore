@@ -2,15 +2,8 @@
 .DS_Store
 Thumbs.db
 
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# Build output
+dist/
 
-# C extensions
-*.so
-
-# Unit test / coverage reports
-.coverage
-.coverage.*
-coverage.xml
+# Test coverage
+coverage.out

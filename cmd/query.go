@@ -513,15 +513,6 @@ func sortOldestFirst(rows []*index.ReasonRow) {
 	}
 }
 
-func printJSON(rows []*index.ReasonRow, projectRoot string) {
-	var items []map[string]interface{}
-	for _, row := range rows {
-		items = append(items, format.RowToJSON(row, projectRoot, nil))
-	}
-	b, _ := json.MarshalIndent(items, "", "  ")
-	fmt.Println(string(b))
-}
-
 // parseLineRange parses a line spec like "42", "10:20", or "10,20" into start and end.
 func parseLineRange(line string) (int, int) {
 	sep := ""

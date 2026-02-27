@@ -96,7 +96,7 @@ func parsePorcelainBlame(out []byte) map[int]BlameEntry {
 		if len(fields) >= 3 && len(fields[0]) == 40 {
 			currentSHA = fields[0]
 			var finalLine int
-			fmt.Sscanf(fields[2], "%d", &finalLine)
+			_, _ = fmt.Sscanf(fields[2], "%d", &finalLine)
 			if finalLine > 0 {
 				entries[finalLine] = BlameEntry{
 					SHA:  currentSHA,

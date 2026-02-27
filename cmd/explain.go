@@ -49,14 +49,29 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 		start, end := parseLineRange(line)
 		isRange := end > start
 
-		matches, _ := queryLineBlame(db, rel, projectRoot, line)
+		matches, adjMap := queryLineBlame(db, rel, projectRoot, line)
 		if len(matches) == 0 {
 			fmt.Printf("No reasons found for %s at line %s\n", rel, line)
 			return
 		}
 
 		if isRange {
-			explainRange(db, matches, rel, projectRoot, start, end)
+			// Filter to records whose adjusted lines actually overlap the range
+			var filtered []*index.ReasonRow
+			for _, row := range matches {
+				adj := adjMap[row]
+				if adj != nil && !adj.Superseded && !adj.CurrentLines.IsEmpty() && adj.CurrentLines.Overlaps(start, end) {
+					filtered = append(filtered, row)
+				} else if adj == nil {
+					// No adjustment info — include by default
+					filtered = append(filtered, row)
+				}
+			}
+			if len(filtered) == 0 {
+				fmt.Printf("No reasons found for %s at lines %d-%d\n", rel, start, end)
+				return
+			}
+			explainRange(db, filtered, rel, projectRoot, start, end)
 		} else {
 			if len(matches) > 1 {
 				fmt.Fprintf(os.Stderr, "%s(%d records match — explaining the most recent)%s\n\n",

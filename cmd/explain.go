@@ -49,21 +49,21 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 		start, end := parseLineRange(line)
 		isRange := end > start
 
-		matches, adjMap := queryLineBlame(db, rel, projectRoot, line)
-		if len(matches) == 0 {
-			fmt.Printf("No reasons found for %s at line %s\n", rel, line)
-			return
-		}
-
 		if isRange {
-			// Filter to records whose adjusted lines actually overlap the range
+			// For ranges, blame the whole file so CurrentLines reflect true positions
+			allRows, err := queryRows(db,
+				"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts DESC",
+				rel, "%/"+rel)
+			if err != nil || len(allRows) == 0 {
+				fmt.Printf("No reasons found for %s\n", rel)
+				return
+			}
+			adjMap := blameAdjustFile(projectRoot, rel, allRows)
+
 			var filtered []*index.ReasonRow
-			for _, row := range matches {
+			for _, row := range allRows {
 				adj := adjMap[row]
 				if adj != nil && !adj.Superseded && !adj.CurrentLines.IsEmpty() && adj.CurrentLines.Overlaps(start, end) {
-					filtered = append(filtered, row)
-				} else if adj == nil {
-					// No adjustment info — include by default
 					filtered = append(filtered, row)
 				}
 			}
@@ -71,8 +71,14 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 				fmt.Printf("No reasons found for %s at lines %d-%d\n", rel, start, end)
 				return
 			}
+			sortNewestFirst(filtered)
 			explainRange(db, filtered, rel, projectRoot, start, end)
 		} else {
+			matches, _ := queryLineBlame(db, rel, projectRoot, line)
+			if len(matches) == 0 {
+				fmt.Printf("No reasons found for %s at line %s\n", rel, line)
+				return
+			}
 			if len(matches) > 1 {
 				fmt.Fprintf(os.Stderr, "%s(%d records match — explaining the most recent)%s\n\n",
 					format.Dim, len(matches), format.Reset)

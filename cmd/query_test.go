@@ -68,6 +68,30 @@ func TestNearestRegion(t *testing.T) {
 	}
 }
 
+func TestParseLineRange(t *testing.T) {
+	tests := []struct {
+		input string
+		start int
+		end   int
+	}{
+		{"42", 42, 42},
+		{"10:20", 10, 20},
+		{"10,20", 10, 20},
+		{"1:1", 1, 1},
+		{"5,5", 5, 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			start, end := parseLineRange(tt.input)
+			if start != tt.start || end != tt.end {
+				t.Errorf("parseLineRange(%q) = (%d, %d), want (%d, %d)",
+					tt.input, start, end, tt.start, tt.end)
+			}
+		})
+	}
+}
+
 func TestRecordMidpoint(t *testing.T) {
 	intPtr := func(v int) *int { return &v }
 

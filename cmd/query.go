@@ -84,16 +84,8 @@ func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput
 // queryLineBlame uses git blame to find which records own the queried lines.
 // Returns matches sorted newest first, plus a map of adjustments for all records.
 func queryLineBlame(db *sql.DB, rel, projectRoot, line string) ([]*index.ReasonRow, map[*index.ReasonRow]*format.LineAdjustment) {
-	// Parse the query line
-	var queryStart, queryEnd int
-	if strings.Contains(line, ":") {
-		parts := strings.SplitN(line, ":", 2)
-		queryStart, _ = strconv.Atoi(parts[0])
-		queryEnd, _ = strconv.Atoi(parts[1])
-	} else {
-		queryStart, _ = strconv.Atoi(line)
-		queryEnd = queryStart
-	}
+	// Parse the query line (supports "42", "10:20", "10,20")
+	queryStart, queryEnd := parseLineRange(line)
 
 	// Run git blame on the queried range
 	blameEntries, blameErr := git.BlameRange(projectRoot, rel, queryStart, queryEnd)
@@ -521,13 +513,22 @@ func sortOldestFirst(rows []*index.ReasonRow) {
 	}
 }
 
-func printJSON(rows []*index.ReasonRow, projectRoot string) {
-	var items []map[string]interface{}
-	for _, row := range rows {
-		items = append(items, format.RowToJSON(row, projectRoot, nil))
+// parseLineRange parses a line spec like "42", "10:20", or "10,20" into start and end.
+func parseLineRange(line string) (int, int) {
+	sep := ""
+	if strings.Contains(line, ":") {
+		sep = ":"
+	} else if strings.Contains(line, ",") {
+		sep = ","
 	}
-	b, _ := json.MarshalIndent(items, "", "  ")
-	fmt.Println(string(b))
+	if sep != "" {
+		parts := strings.SplitN(line, sep, 2)
+		start, _ := strconv.Atoi(parts[0])
+		end, _ := strconv.Atoi(parts[1])
+		return start, end
+	}
+	n, _ := strconv.Atoi(line)
+	return n, n
 }
 
 func printAdjustedJSON(rows []*index.ReasonRow, adjMap map[*index.ReasonRow]*format.LineAdjustment, projectRoot string) {

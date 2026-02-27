@@ -14,7 +14,7 @@ import (
 func RunQuery(args []string) {
 	fs := flag.NewFlagSet("git-blamebot", flag.ExitOnError)
 
-	line := fs.String("L", "", "Line number or range (42 or 10:20)")
+	line := fs.String("L", "", "Line number or range (42 or 10:20 or 10,20)")
 	grepPattern := fs.String("grep", "", "Search prompts and changes")
 	since := fs.String("since", "", "Show reasons since date (YYYY-MM-DD)")
 	author := fs.String("author", "", "Filter by author name")
@@ -37,7 +37,7 @@ func RunQuery(args []string) {
 Usage:
     git-blamebot <file>                    # all reasons for a file
     git-blamebot -L <line> <file>          # reasons for a specific line
-    git-blamebot -L <start>:<end> <file>   # reasons for a line range
+    git-blamebot -L <start>,<end> <file>   # reasons for a line range
     git-blamebot --since <date> [<file>]   # reasons since a date
     git-blamebot --grep <text>             # search prompts & changes
     git-blamebot --author <name>           # filter by author

@@ -353,7 +353,7 @@ func populateCommitSHAs(db *sql.DB, paths project.Paths, refs []sourceRef) {
 		// Update each record's commit_sha
 		for _, lineNum := range lineNums {
 			if sha, ok := blameMap[lineNum]; ok && sha != "" {
-				db.Exec(
+				_, _ = db.Exec(
 					"UPDATE reasons SET commit_sha = ? WHERE source_file = ? AND id = (SELECT id FROM reasons WHERE source_file = ? ORDER BY id LIMIT 1 OFFSET ?)",
 					sha, sourceFile, sourceFile, lineNum-1,
 				)
@@ -368,8 +368,8 @@ func storeHeadSHA(db *sql.DB, root string) {
 	if sha == "" {
 		return
 	}
-	db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-	db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('head_sha', ?)", sha)
+	_, _ = db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+	_, _ = db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('head_sha', ?)", sha)
 }
 
 // headSHAChanged returns true if HEAD has changed since the last rebuild.

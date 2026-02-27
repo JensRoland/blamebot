@@ -274,11 +274,15 @@ func editChangedLines(oldStr, newStr string, toolResponse map[string]interface{}
 		return lineset.LineSet{}, nil
 	}
 
+	// structuredPatch uses 0-indexed positions; convert to 1-indexed
+	newStart++
+	oldStart := getIntOr(patch, "oldStart", newStart-1) + 1
+
 	nLines := getIntOr(patch, "newLines", 0)
 	hunk := &record.HunkInfo{
 		NewStart: newStart,
 		NewLines: nLines,
-		OldStart: getIntOr(patch, "oldStart", newStart),
+		OldStart: oldStart,
 		OldLines: getIntOr(patch, "oldLines", nLines),
 	}
 

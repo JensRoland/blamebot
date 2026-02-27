@@ -45,10 +45,7 @@ func TestFormatReason_AdjustedSameAsStored(t *testing.T) {
 
 	result := FormatReason(row, "/tmp/project", false, adj)
 
-	// Should display current only (no arrow) since positions didn't change
-	if strings.Contains(result, "\u2192") {
-		t.Errorf("should NOT contain arrow when positions unchanged, got %s", result)
-	}
+	// Should display current lines only
 	if !strings.Contains(result, "L10-14") {
 		t.Errorf("should contain L10-14, got %s", result)
 	}
@@ -69,15 +66,15 @@ func TestFormatReason_AdjustedShifted(t *testing.T) {
 
 	result := FormatReason(row, "/tmp/project", false, adj)
 
-	// Should show original→current
-	if !strings.Contains(result, "L10-14") {
-		t.Errorf("should contain original L10-14, got %s", result)
-	}
-	if !strings.Contains(result, "\u2192") {
-		t.Errorf("should contain arrow, got %s", result)
-	}
+	// Should show only current adjusted lines (no original, no arrow)
 	if !strings.Contains(result, "L15-19") {
 		t.Errorf("should contain adjusted L15-19, got %s", result)
+	}
+	if strings.Contains(result, "L10-14") {
+		t.Errorf("should NOT contain original L10-14, got %s", result)
+	}
+	if strings.Contains(result, "\u2192") {
+		t.Errorf("should NOT contain arrow, got %s", result)
 	}
 }
 

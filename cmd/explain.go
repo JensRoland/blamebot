@@ -30,7 +30,7 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 
 		if line != "" {
 			// Use adjusted line query
-			matches, _ := queryAdjustedLine(db, rel, line)
+			matches, _ := queryLineBlame(db, rel, projectRoot, line)
 			if len(matches) == 0 {
 				fmt.Printf("No reasons found for %s at line %s\n", rel, line)
 				return

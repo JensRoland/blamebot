@@ -92,25 +92,25 @@ func TestHandlePostToolUse_EndToEnd(t *testing.T) {
 		t.Errorf("file = %q, want %q", rec.File, "src/main.go")
 	}
 
-	// Verify lines — LCS should identify only line 11 as changed
-	// (second line of the 2-line edit at newStart=10)
+	// Verify lines — LCS should identify only line 12 as changed
+	// (second line of the 2-line edit; structuredPatch newStart=10 is 0-indexed → 1-indexed 11)
 	if rec.Lines.IsEmpty() {
 		t.Fatal("lines should not be empty")
 	}
 	gotLines := rec.Lines.Lines()
-	if len(gotLines) != 1 || gotLines[0] != 11 {
-		t.Errorf("lines = %v, want [11]", gotLines)
+	if len(gotLines) != 1 || gotLines[0] != 12 {
+		t.Errorf("lines = %v, want [12]", gotLines)
 	}
 
-	// Verify hunk metadata
+	// Verify hunk metadata (0-indexed patch values converted to 1-indexed)
 	if rec.Hunk == nil {
 		t.Fatal("hunk should not be nil")
 	}
-	if rec.Hunk.OldStart != 10 || rec.Hunk.OldLines != 2 {
-		t.Errorf("hunk = %+v, want OldStart=10 OldLines=2", *rec.Hunk)
+	if rec.Hunk.OldStart != 11 || rec.Hunk.OldLines != 2 {
+		t.Errorf("hunk = %+v, want OldStart=11 OldLines=2", *rec.Hunk)
 	}
-	if rec.Hunk.NewStart != 10 || rec.Hunk.NewLines != 2 {
-		t.Errorf("hunk = %+v, want NewStart=10 NewLines=2", *rec.Hunk)
+	if rec.Hunk.NewStart != 11 || rec.Hunk.NewLines != 2 {
+		t.Errorf("hunk = %+v, want NewStart=11 NewLines=2", *rec.Hunk)
 	}
 
 	// Verify content hash is set

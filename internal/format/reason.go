@@ -71,21 +71,8 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool, adj *L
 	var hashStart, hashEnd *int
 	var lines string
 	if adj != nil && !adj.CurrentLines.IsEmpty() {
-		// Show adjusted lines
-		currentStr := "L" + adj.CurrentLines.String()
-		var origStr string
-		if row.LineStart != nil {
-			if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
-				origStr = fmt.Sprintf("L%d-%d", *row.LineStart, *row.LineEnd)
-			} else {
-				origStr = fmt.Sprintf("L%d", *row.LineStart)
-			}
-		}
-		if origStr != "" && origStr != currentStr {
-			lines = origStr + "\u2192" + currentStr
-		} else {
-			lines = currentStr
-		}
+		// Show current adjusted lines only
+		lines = "L" + adj.CurrentLines.String()
 		// Use adjusted positions for hash verification
 		mn := adj.CurrentLines.Min()
 		mx := adj.CurrentLines.Max()

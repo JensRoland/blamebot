@@ -35,15 +35,15 @@ func TestExtractEdits_Edit(t *testing.T) {
 	if e.File != "src/main.go" {
 		t.Errorf("file = %q, want %q", e.File, "src/main.go")
 	}
-	// LCS should identify only line 6 as changed (line 2 of the new string, at offset 5)
-	if !reflect.DeepEqual(e.Lines.Lines(), []int{6}) {
-		t.Errorf("lines = %v, want [6]", e.Lines.Lines())
+	// LCS should identify only line 7 as changed (0-indexed patch newStart=5 → 1-indexed 6, second line is 7)
+	if !reflect.DeepEqual(e.Lines.Lines(), []int{7}) {
+		t.Errorf("lines = %v, want [7]", e.Lines.Lines())
 	}
 	if e.Hunk == nil {
 		t.Fatal("hunk should not be nil")
 	}
-	if e.Hunk.OldStart != 5 || e.Hunk.OldLines != 3 || e.Hunk.NewStart != 5 || e.Hunk.NewLines != 3 {
-		t.Errorf("hunk = %+v, want {5,3,5,3}", *e.Hunk)
+	if e.Hunk.OldStart != 6 || e.Hunk.OldLines != 3 || e.Hunk.NewStart != 6 || e.Hunk.NewLines != 3 {
+		t.Errorf("hunk = %+v, want {6,3,6,3}", *e.Hunk)
 	}
 	if e.ContentHash == "" {
 		t.Error("content_hash should not be empty")
@@ -186,17 +186,17 @@ func TestExtractEdits_MultiEdit(t *testing.T) {
 		t.Fatalf("expected 2 edits, got %d", len(edits))
 	}
 
-	// First edit: line 11 changed (b -> X)
-	if !reflect.DeepEqual(edits[0].Lines.Lines(), []int{11}) {
-		t.Errorf("edit 0 lines = %v, want [11]", edits[0].Lines.Lines())
+	// First edit: line 12 changed (0-indexed patch 10 → 1-indexed 11, second line is 12)
+	if !reflect.DeepEqual(edits[0].Lines.Lines(), []int{12}) {
+		t.Errorf("edit 0 lines = %v, want [12]", edits[0].Lines.Lines())
 	}
-	if edits[0].Hunk == nil || edits[0].Hunk.NewStart != 10 {
+	if edits[0].Hunk == nil || edits[0].Hunk.NewStart != 11 {
 		t.Errorf("edit 0 hunk unexpected: %+v", edits[0].Hunk)
 	}
 
-	// Second edit: line 30 changed (c -> Y)
-	if !reflect.DeepEqual(edits[1].Lines.Lines(), []int{30}) {
-		t.Errorf("edit 1 lines = %v, want [30]", edits[1].Lines.Lines())
+	// Second edit: line 31 changed (0-indexed patch 30 → 1-indexed 31, first line changed)
+	if !reflect.DeepEqual(edits[1].Lines.Lines(), []int{31}) {
+		t.Errorf("edit 1 lines = %v, want [31]", edits[1].Lines.Lines())
 	}
 }
 
@@ -342,13 +342,14 @@ func TestEditChangedLines_Normal(t *testing.T) {
 	}
 
 	lines, hunk := editChangedLines("a\nb\nc", "a\nX\nc", resp)
-	if !reflect.DeepEqual(lines.Lines(), []int{11}) {
-		t.Errorf("lines = %v, want [11]", lines.Lines())
+	// 0-indexed newStart=10 → 1-indexed 11; changed line is second = 12
+	if !reflect.DeepEqual(lines.Lines(), []int{12}) {
+		t.Errorf("lines = %v, want [12]", lines.Lines())
 	}
 	if hunk == nil {
 		t.Fatal("hunk should not be nil")
 	}
-	want := record.HunkInfo{OldStart: 10, OldLines: 3, NewStart: 10, NewLines: 3}
+	want := record.HunkInfo{OldStart: 11, OldLines: 3, NewStart: 11, NewLines: 3}
 	if *hunk != want {
 		t.Errorf("hunk = %+v, want %+v", *hunk, want)
 	}
@@ -409,9 +410,10 @@ func TestEditChangedLines_Insertion(t *testing.T) {
 	}
 
 	// Insert "b" between "a" and "c"
+	// 0-indexed newStart=5 → 1-indexed 6; inserted line is second = 7
 	lines, hunk := editChangedLines("a\nc", "a\nb\nc", resp)
-	if !reflect.DeepEqual(lines.Lines(), []int{6}) {
-		t.Errorf("lines = %v, want [6]", lines.Lines())
+	if !reflect.DeepEqual(lines.Lines(), []int{7}) {
+		t.Errorf("lines = %v, want [7]", lines.Lines())
 	}
 	if hunk.NewLines != 3 || hunk.OldLines != 2 {
 		t.Errorf("hunk = %+v, want NewLines=3 OldLines=2", *hunk)
@@ -432,9 +434,9 @@ func TestEditChangedLines_DefaultHunkFields(t *testing.T) {
 	if hunk == nil {
 		t.Fatal("hunk should not be nil")
 	}
-	// oldStart defaults to newStart, others to 0
-	if hunk.OldStart != 7 {
-		t.Errorf("hunk.OldStart = %d, want 7 (default to newStart)", hunk.OldStart)
+	// 0-indexed newStart=7 → 1-indexed 8; oldStart defaults to same
+	if hunk.OldStart != 8 {
+		t.Errorf("hunk.OldStart = %d, want 8 (default to newStart)", hunk.OldStart)
 	}
 	if hunk.OldLines != 0 || hunk.NewLines != 0 {
 		t.Errorf("hunk missing fields should default to 0, got %+v", *hunk)

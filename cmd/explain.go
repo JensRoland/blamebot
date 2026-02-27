@@ -28,44 +28,34 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 		// File path query
 		rel := relativePath(target, projectRoot)
 
-		conditions := []string{"(file = ? OR file LIKE ?)"}
-		params := []interface{}{rel, "%/" + rel}
-
 		if line != "" {
-			if strings.Contains(line, ":") {
-				parts := strings.SplitN(line, ":", 2)
-				start, _ := strconv.Atoi(parts[0])
-				end, _ := strconv.Atoi(parts[1])
-				conditions = append(conditions, "(line_start <= ? AND (line_end >= ? OR line_end IS NULL))")
-				params = append(params, end, start)
-			} else {
-				lineNum, _ := strconv.Atoi(line)
-				conditions = append(conditions, "(line_start <= ? AND (line_end >= ? OR line_start = ?))")
-				params = append(params, lineNum, lineNum, lineNum)
+			// Use adjusted line query
+			matches, _ := queryAdjustedLine(db, rel, line)
+			if len(matches) == 0 {
+				fmt.Printf("No reasons found for %s at line %s\n", rel, line)
+				return
 			}
-		}
-
-		where := strings.Join(conditions, " AND ")
-		rows, err := queryRows(db,
-			fmt.Sprintf("SELECT * FROM reasons WHERE %s ORDER BY ts DESC", where),
-			params...)
-		if err != nil || len(rows) == 0 {
-			loc := ""
-			if line != "" {
-				loc = " at line " + line
+			if len(matches) > 1 {
+				fmt.Fprintf(os.Stderr, "%s(%d records match — explaining the most recent)%s\n\n",
+					format.Dim, len(matches), format.Reset)
 			}
-			fmt.Printf("No reasons found for %s%s\n", rel, loc)
-			return
+			row = matches[0]
+		} else {
+			rows, err := queryRows(db,
+				"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts DESC",
+				rel, "%/"+rel)
+			if err != nil || len(rows) == 0 {
+				fmt.Printf("No reasons found for %s\n", rel)
+				return
+			}
+			if len(rows) > 1 {
+				fmt.Fprintf(os.Stderr, "%s(%d records match — explaining the most recent)%s\n\n",
+					format.Dim, len(rows), format.Reset)
+			}
+			row = rows[0]
 		}
-
-		if len(rows) > 1 {
-			fmt.Fprintf(os.Stderr, "%s(%d records match — explaining the most recent)%s\n\n",
-				format.Dim, len(rows), format.Reset)
-		}
-
-		row = rows[0]
 	}
-	fmt.Println(format.FormatReason(row, projectRoot, false))
+	fmt.Println(format.FormatReason(row, projectRoot, false, nil))
 	fmt.Println()
 
 	// Show side-by-side diff if available
@@ -142,7 +132,9 @@ func cmdExplain(db *sql.DB, target, projectRoot, line string) {
 	}
 
 	parts = append(parts, fmt.Sprintf("File: %s", row.File))
-	if row.LineStart != nil {
+	if row.ChangedLines != nil && *row.ChangedLines != "" {
+		parts = append(parts, fmt.Sprintf("Lines: %s", *row.ChangedLines))
+	} else if row.LineStart != nil {
 		if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
 			parts = append(parts, fmt.Sprintf("Lines: %d-%d", *row.LineStart, *row.LineEnd))
 		} else {

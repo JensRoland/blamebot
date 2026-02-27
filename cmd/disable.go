@@ -37,7 +37,7 @@ func cmdDisable(paths project.Paths, projectRoot string) {
 	}
 
 	// 3. Clean pre-commit hook
-	preCommit := filepath.Join(projectRoot, ".git", "hooks", "pre-commit")
+	preCommit := filepath.Join(paths.GitDir, "hooks", "pre-commit")
 	if data, err := os.ReadFile(preCommit); err == nil {
 		content := string(data)
 		marker := "# blamebot: fill reasons"

@@ -11,10 +11,11 @@ import (
 // Paths holds all relevant directories for a blamebot-enabled repo.
 type Paths struct {
 	Root      string // git repo root
+	GitDir    string // actual .git directory (resolved for worktrees)
 	LogDir    string // .blamebot/log/
 	TracesDir string // .blamebot/traces/
-	CacheDir  string // .git/blamebot/
-	IndexDB   string // .git/blamebot/index.db
+	CacheDir  string // <gitdir>/blamebot/
+	IndexDB   string // <gitdir>/blamebot/index.db
 }
 
 // FindRoot returns the git project root, preferring CLAUDE_PROJECT_DIR if set.
@@ -31,13 +32,42 @@ func FindRoot() (string, error) {
 
 // NewPaths constructs all path constants from a project root.
 func NewPaths(root string) Paths {
+	gitDir := resolveGitDir(root)
 	return Paths{
 		Root:      root,
+		GitDir:    gitDir,
 		LogDir:    filepath.Join(root, ".blamebot", "log"),
 		TracesDir: filepath.Join(root, ".blamebot", "traces"),
-		CacheDir:  filepath.Join(root, ".git", "blamebot"),
-		IndexDB:   filepath.Join(root, ".git", "blamebot", "index.db"),
+		CacheDir:  filepath.Join(gitDir, "blamebot"),
+		IndexDB:   filepath.Join(gitDir, "blamebot", "index.db"),
 	}
+}
+
+// resolveGitDir returns the actual .git directory, handling worktrees
+// where .git is a file containing "gitdir: <path>".
+func resolveGitDir(root string) string {
+	dotGit := filepath.Join(root, ".git")
+	info, err := os.Lstat(dotGit)
+	if err != nil {
+		return dotGit
+	}
+	if info.IsDir() {
+		return dotGit
+	}
+	// .git is a file (worktree) — read the gitdir pointer
+	data, err := os.ReadFile(dotGit)
+	if err != nil {
+		return dotGit
+	}
+	content := strings.TrimSpace(string(data))
+	if !strings.HasPrefix(content, "gitdir: ") {
+		return dotGit
+	}
+	gitdir := strings.TrimPrefix(content, "gitdir: ")
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(root, gitdir)
+	}
+	return gitdir
 }
 
 // IsInitialized returns true if .blamebot/ directory exists.

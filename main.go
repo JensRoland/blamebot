@@ -20,7 +20,7 @@ func main() {
 		cmd.RunHook(os.Args[2:])
 	case "enable":
 		cmd.RunEnable(os.Args[2:])
-	case "disable":
+	case "disable", "uninit":
 		cmd.RunDisable(os.Args[2:])
 	case "--version":
 		fmt.Println("git-blamebot", version)

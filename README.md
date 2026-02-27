@@ -2,12 +2,14 @@
 
 **Provenance tracking for AI-authored code.** `git blame` tells you *who* and *when*. `git blamebot` tells you *why* — the user prompt and reasoning behind every AI edit.
 
+This is very similar in concept to the more mature [Git AI](https://usegitai.com/) but with a focus on detailed line-level reasoning.
+
 ## How it works
 
 Two Claude Code hooks capture context on every AI edit:
 
 1. **`UserPromptSubmit`** — captures your prompt (with IDE metadata stripped) and stashes it for the edit hook
-2. **`PostToolUse`** on `Edit/Write/MultiEdit` — records what changed: file, lines, content hash, and a compact diff summary
+2. **`PostToolUse`** on `Edit/Write/MultiEdit` — records what changed: file, precise changed lines (via LCS diffing), content hash, hunk metadata, and a compact diff summary
 
 At **commit time**, a pre-commit hook calls `git-blamebot --fill-reasons`, which reads the Claude transcript for each edit and sends the session context to Claude Haiku to generate a one-sentence reason per edit. It also extracts and commits trace contexts (thinking/response blocks) so they're portable across machines.
 
@@ -95,7 +97,7 @@ git blamebot --dump-payload     # last raw payloads
 {
   "ts": "2026-02-25T14:23:13Z",
   "file": "app/pages/editor/index.php",
-  "lines": [5, 7],
+  "lines": "5,7",
   "content_hash": "be40cdf0917128af",
   "prompt": "Change all messages to 90s cool kid speak",
   "reason": "Updated error messages to use 90s cool kid slang as requested by the user.",
@@ -103,7 +105,8 @@ git blamebot --dump-payload     # last raw payloads
   "tool": "Edit",
   "author": "Jens",
   "session": "9257ef4a-54a7-4600-b3e9-c39b1c6b993c",
-  "trace": "/Users/jensr/.claude/projects/test/9257ef4a.jsonl#toolu_01KhbrJWYdB7gw98YRFxW2i5"
+  "trace": "/Users/jensr/.claude/projects/test/9257ef4a.jsonl#toolu_01KhbrJWYdB7gw98YRFxW2i5",
+  "hunk": {"old_start": 5, "old_lines": 2, "new_start": 5, "new_lines": 2}
 }
 ```
 
@@ -121,7 +124,7 @@ make test     # run tests
 make install  # build + install + configure hooks
 ```
 
-Requires Go 1.22+. No CGO — the binary is fully static and cross-compilable.
+Requires Go 1.24+. No CGO — the binary is fully static and cross-compilable.
 
 ## Future ideas
 

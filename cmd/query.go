@@ -10,6 +10,7 @@ import (
 
 	"github.com/jensroland/git-blamebot/internal/format"
 	"github.com/jensroland/git-blamebot/internal/index"
+	"github.com/jensroland/git-blamebot/internal/linemap"
 )
 
 func relativePath(filePath, projectRoot string) string {
@@ -26,32 +27,30 @@ func relativePath(filePath, projectRoot string) string {
 func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput bool) {
 	rel := relativePath(filePath, projectRoot)
 
-	conditions := []string{"(file = ? OR file LIKE ?)"}
-	params := []interface{}{rel, "%/" + rel}
-
 	if line != "" {
-		if strings.Contains(line, ":") {
-			parts := strings.SplitN(line, ":", 2)
-			start, _ := strconv.Atoi(parts[0])
-			end, _ := strconv.Atoi(parts[1])
-			conditions = append(conditions, "(line_start <= ? AND (line_end >= ? OR line_end IS NULL))")
-			params = append(params, end, start)
-		} else {
-			lineNum, _ := strconv.Atoi(line)
-			conditions = append(conditions, "(line_start <= ? AND (line_end >= ? OR line_start = ?))")
-			params = append(params, lineNum, lineNum, lineNum)
+		// Two-pass adjusted line query
+		matches, adjustments := queryAdjustedLine(db, rel, line)
+		if len(matches) == 0 {
+			fmt.Printf("No reasons found for %s at line %s\n", rel, line)
+			return
 		}
+
+		if jsonOutput {
+			printAdjustedJSON(matches, adjustments, projectRoot)
+			return
+		}
+
+		// Show only the most recent match
+		adj := adjustments[matches[0]]
+		fmt.Println(format.FormatReason(matches[0], projectRoot, verbose, adj))
+		fmt.Println()
+		return
 	}
 
-	where := strings.Join(conditions, " AND ")
-	limit := ""
-	if line != "" {
-		limit = " LIMIT 1"
-	}
-
+	// No line filter: show all records
 	rows, err := queryRows(db,
-		fmt.Sprintf("SELECT * FROM reasons WHERE %s ORDER BY ts DESC%s", where, limit),
-		params...)
+		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts DESC",
+		rel, "%/"+rel)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -63,18 +62,79 @@ func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput
 	}
 
 	if len(rows) == 0 {
-		msg := fmt.Sprintf("No reasons found for %s", rel)
-		if line != "" {
-			msg += " at line " + line
-		}
-		fmt.Println(msg)
+		fmt.Printf("No reasons found for %s\n", rel)
 		return
 	}
 
 	for _, row := range rows {
-		fmt.Println(format.FormatReason(row, projectRoot, verbose))
+		fmt.Println(format.FormatReason(row, projectRoot, verbose, nil))
 		fmt.Println()
 	}
+}
+
+// queryAdjustedLine fetches all records for a file, computes adjusted line
+// positions, and returns matches for the queried line(s), sorted newest first.
+// Also returns a map from row pointer to its LineAdjustment.
+func queryAdjustedLine(db *sql.DB, rel, line string) ([]*index.ReasonRow, map[*index.ReasonRow]*format.LineAdjustment) {
+	// Fetch all records for this file, ordered oldest first for the simulation
+	allRows, err := queryRows(db,
+		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts ASC",
+		rel, "%/"+rel)
+	if err != nil || len(allRows) == 0 {
+		return nil, nil
+	}
+
+	adjusted := linemap.AdjustLinePositions(allRows)
+
+	// Parse the query line
+	var queryStart, queryEnd int
+	if strings.Contains(line, ":") {
+		parts := strings.SplitN(line, ":", 2)
+		queryStart, _ = strconv.Atoi(parts[0])
+		queryEnd, _ = strconv.Atoi(parts[1])
+	} else {
+		queryStart, _ = strconv.Atoi(line)
+		queryEnd = queryStart
+	}
+
+	var matches []*index.ReasonRow
+	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
+
+	for _, adj := range adjusted {
+		la := &format.LineAdjustment{
+			CurrentLines: adj.CurrentLines,
+			Superseded:   adj.Superseded,
+		}
+		adjMap[adj.ReasonRow] = la
+
+		if adj.Superseded {
+			continue
+		}
+
+		// Match against adjusted positions using precise LineSet
+		if !adj.CurrentLines.IsEmpty() {
+			if adj.CurrentLines.Overlaps(queryStart, queryEnd) {
+				matches = append(matches, adj.ReasonRow)
+			}
+		} else if adj.LineStart != nil {
+			// Fallback to stored lines for records without any line data
+			ls := *adj.LineStart
+			le := ls
+			if adj.LineEnd != nil {
+				le = *adj.LineEnd
+			}
+			if ls <= queryEnd && le >= queryStart {
+				matches = append(matches, adj.ReasonRow)
+			}
+		}
+	}
+
+	// Sort matches newest first
+	for i, j := 0, len(matches)-1; i < j; i, j = i+1, j-1 {
+		matches[i], matches[j] = matches[j], matches[i]
+	}
+
+	return matches, adjMap
 }
 
 func cmdGrep(db *sql.DB, pattern, projectRoot string, verbose, jsonOutput bool) {
@@ -99,7 +159,7 @@ func cmdGrep(db *sql.DB, pattern, projectRoot string, verbose, jsonOutput bool) 
 
 	fmt.Printf("Found %d reason(s) matching '%s':\n\n", len(rows), pattern)
 	for _, row := range rows {
-		fmt.Println(format.FormatReason(row, projectRoot, verbose))
+		fmt.Println(format.FormatReason(row, projectRoot, verbose, nil))
 		fmt.Println()
 	}
 }
@@ -135,7 +195,7 @@ func cmdSince(db *sql.DB, dateStr, filePath, projectRoot string, verbose, jsonOu
 
 	fmt.Printf("Found %d reason(s) since %s:\n\n", len(rows), dateStr)
 	for _, row := range rows {
-		fmt.Println(format.FormatReason(row, projectRoot, verbose))
+		fmt.Println(format.FormatReason(row, projectRoot, verbose, nil))
 		fmt.Println()
 	}
 }
@@ -161,7 +221,7 @@ func cmdAuthor(db *sql.DB, author, projectRoot string, verbose, jsonOutput bool)
 
 	fmt.Printf("Found %d reason(s) by '%s':\n\n", len(rows), author)
 	for _, row := range rows {
-		fmt.Println(format.FormatReason(row, projectRoot, verbose))
+		fmt.Println(format.FormatReason(row, projectRoot, verbose, nil))
 		fmt.Println()
 	}
 }
@@ -169,7 +229,16 @@ func cmdAuthor(db *sql.DB, author, projectRoot string, verbose, jsonOutput bool)
 func printJSON(rows []*index.ReasonRow, projectRoot string) {
 	var items []map[string]interface{}
 	for _, row := range rows {
-		items = append(items, format.RowToJSON(row, projectRoot))
+		items = append(items, format.RowToJSON(row, projectRoot, nil))
+	}
+	b, _ := json.MarshalIndent(items, "", "  ")
+	fmt.Println(string(b))
+}
+
+func printAdjustedJSON(rows []*index.ReasonRow, adjMap map[*index.ReasonRow]*format.LineAdjustment, projectRoot string) {
+	var items []map[string]interface{}
+	for _, row := range rows {
+		items = append(items, format.RowToJSON(row, projectRoot, adjMap[row]))
 	}
 	b, _ := json.MarshalIndent(items, "", "  ")
 	fmt.Println(string(b))

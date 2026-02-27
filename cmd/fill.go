@@ -9,6 +9,7 @@ import (
 
 	"github.com/jensroland/git-blamebot/internal/format"
 	gitutil "github.com/jensroland/git-blamebot/internal/git"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/llm"
 	"github.com/jensroland/git-blamebot/internal/project"
 	"github.com/jensroland/git-blamebot/internal/transcript"
@@ -99,17 +100,30 @@ func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
 			editID++
 
 			var lineStart, lineEnd *int
-			if lines, ok := rec["lines"].([]interface{}); ok {
-				if len(lines) > 0 {
-					if v, ok := lines[0].(float64); ok {
-						n := int(v)
-						lineStart = &n
+			if linesVal, ok := rec["lines"]; ok && linesVal != nil {
+				switch lv := linesVal.(type) {
+				case string:
+					// New format: compact LineSet notation "5,7-8,12"
+					ls, err := lineset.FromString(lv)
+					if err == nil && !ls.IsEmpty() {
+						mn := ls.Min()
+						mx := ls.Max()
+						lineStart = &mn
+						lineEnd = &mx
 					}
-				}
-				if len(lines) > 1 {
-					if v, ok := lines[1].(float64); ok {
-						n := int(v)
-						lineEnd = &n
+				case []interface{}:
+					// Legacy format: [start, end]
+					if len(lv) > 0 {
+						if v, ok := lv[0].(float64); ok {
+							n := int(v)
+							lineStart = &n
+						}
+					}
+					if len(lv) > 1 {
+						if v, ok := lv[1].(float64); ok {
+							n := int(v)
+							lineEnd = &n
+						}
 					}
 				}
 			}

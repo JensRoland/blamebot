@@ -9,7 +9,14 @@ import (
 
 	"github.com/jensroland/git-blamebot/internal/git"
 	"github.com/jensroland/git-blamebot/internal/index"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 )
+
+// LineAdjustment holds computed current line positions for a record.
+type LineAdjustment struct {
+	CurrentLines lineset.LineSet
+	Superseded   bool
+}
 
 // currentContentHash computes the hash for the current file content at given lines.
 func currentContentHash(filePath string, lineStart, lineEnd int) string {
@@ -40,7 +47,8 @@ func currentContentHash(filePath string, lineStart, lineEnd int) string {
 }
 
 // FormatReason formats a ReasonRow for terminal output.
-func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool) string {
+// If adj is non-nil, adjusted line positions are shown.
+func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool, adj *LineAdjustment) string {
 	ts := row.Ts
 	if ts == "" {
 		ts = "?"
@@ -59,27 +67,49 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool) string
 	}
 	author := row.Author
 
-	// Line range display
+	// Determine which lines to display and use for hash verification
+	var hashStart, hashEnd *int
 	var lines string
-	if row.LineStart != nil {
+	if adj != nil && !adj.CurrentLines.IsEmpty() {
+		// Show adjusted lines
+		currentStr := "L" + adj.CurrentLines.String()
+		var origStr string
+		if row.LineStart != nil {
+			if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
+				origStr = fmt.Sprintf("L%d-%d", *row.LineStart, *row.LineEnd)
+			} else {
+				origStr = fmt.Sprintf("L%d", *row.LineStart)
+			}
+		}
+		if origStr != "" && origStr != currentStr {
+			lines = origStr + "\u2192" + currentStr
+		} else {
+			lines = currentStr
+		}
+		// Use adjusted positions for hash verification
+		mn := adj.CurrentLines.Min()
+		mx := adj.CurrentLines.Max()
+		hashStart = &mn
+		hashEnd = &mx
+	} else if row.LineStart != nil {
 		if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
 			lines = fmt.Sprintf("L%d-%d", *row.LineStart, *row.LineEnd)
 		} else {
 			lines = fmt.Sprintf("L%d", *row.LineStart)
 		}
+		hashStart = row.LineStart
+		hashEnd = row.LineEnd
 	}
 
 	// Content hash match indicator
 	matchIndicator := ""
-	if row.ContentHash != "" && row.LineStart != nil {
+	if row.ContentHash != "" && hashStart != nil {
 		fp := filepath.Join(projectRoot, row.File)
-		lineEnd := 0
-		if row.LineEnd != nil {
-			lineEnd = *row.LineEnd
-		} else {
-			lineEnd = *row.LineStart
+		lineEnd := *hashStart
+		if hashEnd != nil {
+			lineEnd = *hashEnd
 		}
-		current := currentContentHash(fp, *row.LineStart, lineEnd)
+		current := currentContentHash(fp, *hashStart, lineEnd)
 		if current == row.ContentHash {
 			matchIndicator = " " + Green + "\u2713" + Reset
 		} else if current != "" {
@@ -151,9 +181,16 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool) string
 			parts = append(parts, fmt.Sprintf("  %sSource:  %s%s", Dim, row.SourceFile, Reset))
 		}
 
-		// Git blame cross-reference
-		if row.LineStart != nil {
-			blame, err := git.BlameForLine(projectRoot, row.File, *row.LineStart)
+		// Git blame cross-reference (use adjusted line if available)
+		var blameLine *int
+		if adj != nil && !adj.CurrentLines.IsEmpty() {
+			mn := adj.CurrentLines.Min()
+			blameLine = &mn
+		} else {
+			blameLine = row.LineStart
+		}
+		if blameLine != nil {
+			blame, err := git.BlameForLine(projectRoot, row.File, *blameLine)
 			if err == nil && blame != nil && blame.SHA != "" {
 				shaShort := blame.SHA[:8]
 				parts = append(parts, fmt.Sprintf("  %sCommit:  %s %s%s", Dim, shaShort, blame.Summary, Reset))
@@ -165,7 +202,7 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool) string
 }
 
 // RowToJSON converts a ReasonRow to a JSON-serializable map.
-func RowToJSON(row *index.ReasonRow, projectRoot string) map[string]interface{} {
+func RowToJSON(row *index.ReasonRow, projectRoot string, adj *LineAdjustment) map[string]interface{} {
 	d := map[string]interface{}{
 		"file":         row.File,
 		"lines":        [2]interface{}{row.LineStart, row.LineEnd},
@@ -180,15 +217,30 @@ func RowToJSON(row *index.ReasonRow, projectRoot string) map[string]interface{} 
 		"trace":        row.Trace,
 		"source_file":  row.SourceFile,
 	}
-	if row.ContentHash != "" && row.LineStart != nil {
-		fp := filepath.Join(projectRoot, row.File)
-		lineEnd := 0
-		if row.LineEnd != nil {
-			lineEnd = *row.LineEnd
-		} else {
-			lineEnd = *row.LineStart
+
+	// Use adjusted positions for hash verification if available
+	var hashStart, hashEnd *int
+	if adj != nil && !adj.CurrentLines.IsEmpty() {
+		d["current_lines"] = adj.CurrentLines.String()
+		mn := adj.CurrentLines.Min()
+		mx := adj.CurrentLines.Max()
+		hashStart = &mn
+		hashEnd = &mx
+		if adj.Superseded {
+			d["superseded"] = true
 		}
-		current := currentContentHash(fp, *row.LineStart, lineEnd)
+	} else {
+		hashStart = row.LineStart
+		hashEnd = row.LineEnd
+	}
+
+	if row.ContentHash != "" && hashStart != nil {
+		fp := filepath.Join(projectRoot, row.File)
+		lineEnd := *hashStart
+		if hashEnd != nil {
+			lineEnd = *hashEnd
+		}
+		current := currentContentHash(fp, *hashStart, lineEnd)
 		if current == row.ContentHash {
 			d["match"] = "exact"
 		} else if current != "" {

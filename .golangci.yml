@@ -1,0 +1,26 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  settings:
+    errcheck:
+      exclude-functions:
+        # CLI output — return values are irrelevant
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - fmt.Printf
+        - fmt.Println
+        # Flag parsing — exits on error by default
+        - (*flag.FlagSet).Parse
+        # Deferred close/cleanup — errors are non-actionable
+        - (*database/sql.DB).Close
+        - (*database/sql.Row).Scan
+        - (*database/sql.Rows).Close
+        - (*database/sql.Rows).Scan
+        - (*database/sql.Stmt).Close
+        - (*database/sql.Stmt).Exec
+        - (*database/sql.Tx).Rollback
+        - (*os.File).Close
+        - (*os.File).WriteString

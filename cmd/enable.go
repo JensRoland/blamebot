@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/jensroland/git-blamebot/internal/project"
 )
 
 // RunEnable handles the "enable" subcommand.
@@ -114,6 +116,7 @@ func enableRepo() {
 		os.Exit(1)
 	}
 	projDir := strings.TrimSpace(string(out))
+	paths := project.NewPaths(projDir)
 
 	fmt.Printf("Initializing blamebot in %s\n", projDir)
 
@@ -143,12 +146,11 @@ Do not edit these files manually.
 	}
 
 	// 2. Local cache
-	cacheDir := filepath.Join(projDir, ".git", "blamebot", "logs")
-	_ = os.MkdirAll(cacheDir, 0o755)
+	_ = os.MkdirAll(filepath.Join(paths.CacheDir, "logs"), 0o755)
 	fmt.Println("  \u2713 Local cache at .git/blamebot/")
 
 	// 3. Pre-commit hook
-	hookDir := filepath.Join(projDir, ".git", "hooks")
+	hookDir := filepath.Join(paths.GitDir, "hooks")
 	preCommit := filepath.Join(hookDir, "pre-commit")
 	fillMarker := "# blamebot: fill reasons"
 

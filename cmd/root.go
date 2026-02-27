@@ -96,7 +96,7 @@ Subcommands:
 
 	db, err := index.Open(paths, *rebuild)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening index: %v\n", err)
+		fmt.Fprintf(os.Stderr, "Error opening index at %s: %v\n", paths.IndexDB, err)
 		os.Exit(1)
 	}
 	defer db.Close()

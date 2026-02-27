@@ -13,7 +13,7 @@ func cmdTrace(db *sql.DB, recordID, projectRoot string, jsonOutput bool) {
 	rows, err := queryRows(db, "SELECT * FROM reasons WHERE id = ?", recordID)
 	if err != nil || len(rows) == 0 {
 		// Try matching by tool_use_id fragment
-		rows, err = queryRows(db,
+		rows, _ = queryRows(db,
 			"SELECT * FROM reasons WHERE trace LIKE ?",
 			"%"+recordID+"%")
 	}
@@ -30,7 +30,7 @@ func cmdTrace(db *sql.DB, recordID, projectRoot string, jsonOutput bool) {
 	row := rows[0]
 
 	if jsonOutput {
-		d := format.RowToJSON(row, projectRoot)
+		d := format.RowToJSON(row, projectRoot, nil)
 		if row.Trace != "" {
 			ctx := transcript.ReadTraceContext(row.Trace, projectRoot)
 			if ctx != "" {
@@ -42,7 +42,7 @@ func cmdTrace(db *sql.DB, recordID, projectRoot string, jsonOutput bool) {
 		return
 	}
 
-	fmt.Println(format.FormatReason(row, projectRoot, true))
+	fmt.Println(format.FormatReason(row, projectRoot, true, nil))
 	fmt.Println()
 
 	if row.Trace == "" {

@@ -45,40 +45,12 @@ The hooks currently assume Claude Code's specific payload structure (`session_id
 
 This is worth doing even if we only add one more agent. The refactoring itself will make the Claude Code path more robust by separating payload parsing from business logic.
 
-Note: The OpenAI Codex team are working on adding hooks: <https://github.com/openai/codex/issues/2109#issuecomment-3946505571>
+Note: [Git AI's approach](https://usegitai.com/docs/cli/how-git-ai-works) is to have the agents set 'checkpoints' before and after every edit. That is a pragmatic way to go about it, and makes integration fairly easy, even for agents without native support for hooks.
 
-## ~~Rewrite in Go~~
-
-**Status**: Done
-
-Rewritten as a single Go binary. Hooks, CLI, and setup are all handled by `git-blamebot` subcommands. JSONL and SQLite formats are backwards-compatible with existing data.
-
-## VS Code extension
-
-**Status**: Should be a separate repo
-
-A VS Code extension that shows blamebot annotations inline, similar to GitLens for `git blame`.
-
-**Core features**:
-
-- Gutter annotations showing the prompt/reason for AI-edited lines
-- Hover card with full detail: prompt, reason, change summary, timestamp, author
-- Click-through to the full reasoning trace
-- "AI-edited" highlighting (lines with blamebot records vs. human-authored lines)
-- CodeLens above functions/blocks showing the most recent AI prompt that touched them
-
-**Implementation**:
-
-- Call `git blamebot -L {line} {file} --json`
-- Cache results per file, invalidate on save
-- Use VS Code's `DecorationProvider` API for gutter icons
-- Use `HoverProvider` for detail cards
-
-**Prerequisites from the CLI side**:
-
-- Ensure the CLI is fast enough for per-line queries (current SQLite index should handle this)
-
-Should live in a separate repo (`blamebot-vscode` or similar) to keep release cycles independent.
+Cursor hooks: <https://cursor.com/docs/agent/hooks>
+Gemini CLI hooks: <https://geminicli.com/docs/hooks/>
+OpenCode plugins and events: <https://opencode.ai/docs/plugins/#create-a-plugin>
+Note: The OpenAI Codex team are working on adding hooks: <https://github.com/openai/codex/issues/2109#issuecomment-3946505571> and Git AI are using the Codex alpha hooks: <https://github.com/git-ai-project/git-ai/pull/504>
 
 ## Other improvements
 

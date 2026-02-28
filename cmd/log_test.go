@@ -21,7 +21,7 @@ func setupLogPaths(t *testing.T) project.Paths {
 
 	return project.Paths{
 		Root:     tmpDir,
-		LogDir:   filepath.Join(tmpDir, ".blamebot", "log"),
+		GitDir:   filepath.Join(tmpDir, ".git"),
 		CacheDir: cacheDir,
 		IndexDB:  filepath.Join(cacheDir, "index.db"),
 	}

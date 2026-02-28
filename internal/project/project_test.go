@@ -21,11 +21,8 @@ func TestNewPaths(t *testing.T) {
 	if want := filepath.Join(root, ".git"); p.GitDir != want {
 		t.Errorf("GitDir = %q, want %q", p.GitDir, want)
 	}
-	if want := filepath.Join(root, ".blamebot", "log"); p.LogDir != want {
-		t.Errorf("LogDir = %q, want %q", p.LogDir, want)
-	}
-	if want := filepath.Join(root, ".blamebot", "traces"); p.TracesDir != want {
-		t.Errorf("TracesDir = %q, want %q", p.TracesDir, want)
+	if want := filepath.Join(root, ".git", "blamebot", "pending"); p.PendingDir != want {
+		t.Errorf("PendingDir = %q, want %q", p.PendingDir, want)
 	}
 	if want := filepath.Join(root, ".git", "blamebot"); p.CacheDir != want {
 		t.Errorf("CacheDir = %q, want %q", p.CacheDir, want)

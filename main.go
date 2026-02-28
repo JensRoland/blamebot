@@ -22,6 +22,8 @@ func main() {
 		cmd.RunEnable(os.Args[2:])
 	case "disable", "uninit":
 		cmd.RunDisable(os.Args[2:])
+	case "debug":
+		cmd.RunDebug(os.Args[2:])
 	case "--version":
 		fmt.Println("git-blamebot", version)
 	default:

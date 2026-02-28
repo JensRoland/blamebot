@@ -63,7 +63,7 @@ func cmdStats(db *sql.DB, jsonOutput bool) {
 			"total_records": total,
 			"files_tracked": files,
 			"authors":       authors,
-			"log_files":     sources,
+			"manifests":     sources,
 			"first_record":  nullStr(first),
 			"last_record":   nullStr(last),
 			"top_files":     topFilesJSON,
@@ -77,7 +77,7 @@ func cmdStats(db *sql.DB, jsonOutput bool) {
 	fmt.Printf("  Total records:  %d\n", total)
 	fmt.Printf("  Files tracked:  %d\n", files)
 	fmt.Printf("  Authors:        %d\n", authors)
-	fmt.Printf("  Log files:      %d\n", sources)
+	fmt.Printf("  Manifests:      %d\n", sources)
 	fmt.Printf("  First record:   %s\n", nullStr(first))
 	fmt.Printf("  Last record:    %s\n", nullStr(last))
 

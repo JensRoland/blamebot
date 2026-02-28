@@ -197,6 +197,24 @@ func TestFromRange(t *testing.T) {
 		t.Errorf("FromRange(3,6) = %v, want [3 4 5 6]", ls.Lines())
 	}
 
+	// Test Add method
+	added := FromRange(1, 3).Add(5)
+	if !reflect.DeepEqual(added.Lines(), []int{1, 2, 3, 5}) {
+		t.Errorf("Add(5) to 1-3: got %v", added.Lines())
+	}
+
+	// Add duplicate
+	dup := FromRange(1, 3).Add(2)
+	if !reflect.DeepEqual(dup.Lines(), []int{1, 2, 3}) {
+		t.Errorf("Add(2) duplicate: got %v", dup.Lines())
+	}
+
+	// Add to empty
+	fromEmpty := LineSet{}.Add(7)
+	if !reflect.DeepEqual(fromEmpty.Lines(), []int{7}) {
+		t.Errorf("Add(7) to empty: got %v", fromEmpty.Lines())
+	}
+
 	empty := FromRange(5, 3) // invalid
 	if !empty.IsEmpty() {
 		t.Errorf("FromRange(5,3) should be empty, got %v", empty.Lines())

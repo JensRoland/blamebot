@@ -8,8 +8,9 @@ import (
 
 // BlameEntry holds parsed git blame data for a single line.
 type BlameEntry struct {
-	SHA  string // 40-char commit SHA (0000... for uncommitted)
-	Line int    // 1-based line number in current file
+	SHA      string // 40-char commit SHA (0000... for uncommitted)
+	Line     int    // 1-based line number in current file
+	OrigLine int    // 1-based line number in the original commit
 }
 
 // IsUncommitted returns true if the blame entry is for uncommitted content.
@@ -37,22 +38,6 @@ func BlameRange(root, file string, start, end int) (map[int]BlameEntry, error) {
 		return nil, fmt.Errorf("git blame -L %d,%d %s: %w", start, end, file, err)
 	}
 	return parsePorcelainBlame(out), nil
-}
-
-// BlameJSONLLines runs git blame on a JSONL file and returns commit SHA per line number.
-// Used during index rebuild to populate commit_sha.
-func BlameJSONLLines(root, jsonlFile string) (map[int]string, error) {
-	entries, err := BlameFile(root, jsonlFile)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[int]string, len(entries))
-	for lineNum, entry := range entries {
-		if !entry.IsUncommitted() {
-			result[lineNum] = entry.SHA
-		}
-	}
-	return result, nil
 }
 
 // parsePorcelainBlame parses git blame --porcelain output.
@@ -95,12 +80,14 @@ func parsePorcelainBlame(out []byte) map[int]BlameEntry {
 		fields := strings.Fields(line)
 		if len(fields) >= 3 && len(fields[0]) == 40 {
 			currentSHA = fields[0]
-			var finalLine int
+			var origLine, finalLine int
+			_, _ = fmt.Sscanf(fields[1], "%d", &origLine)
 			_, _ = fmt.Sscanf(fields[2], "%d", &finalLine)
 			if finalLine > 0 {
 				entries[finalLine] = BlameEntry{
-					SHA:  currentSHA,
-					Line: finalLine,
+					SHA:      currentSHA,
+					Line:     finalLine,
+					OrigLine: origLine,
 				}
 			}
 		}

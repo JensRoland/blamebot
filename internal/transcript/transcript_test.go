@@ -3,6 +3,7 @@ package transcript
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -77,6 +78,52 @@ func writeJSONL(t *testing.T, dir string, name string, lines []string) string {
 		t.Fatalf("write JSONL: %v", err)
 	}
 	return path
+}
+
+// initProvBranch creates a git repo in dir with a blamebot-provenance orphan branch
+// containing traces/<sessionID>.json with the given traces map.
+func initProvBranch(t *testing.T, dir string, sessionID string, traces map[string]string) {
+	t.Helper()
+
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(args[0], args[1:]...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@test.com",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@test.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("command %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	// Initialize repo with a main branch commit
+	run("git", "init", "-b", "main")
+	run("git", "commit", "--allow-empty", "-m", "init")
+
+	// Create orphan branch blamebot-provenance with trace file
+	run("git", "checkout", "--orphan", "blamebot-provenance")
+
+	tracesDir := filepath.Join(dir, "traces")
+	if err := os.MkdirAll(tracesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(traces)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tracesDir, sessionID+".json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	run("git", "add", "traces")
+	run("git", "commit", "-m", "add traces")
+
+	// Switch back to main
+	run("git", "checkout", "main")
 }
 
 // --- TestCleanPromptText ---
@@ -519,18 +566,11 @@ func TestReadTraceContext(t *testing.T) {
 
 	t.Run("reads from committed traces JSON file", func(t *testing.T) {
 		dir := t.TempDir()
-		tracesDir := filepath.Join(dir, ".blamebot", "traces")
-		if err := os.MkdirAll(tracesDir, 0755); err != nil {
-			t.Fatal(err)
-		}
 
-		traces := map[string]string{
+		// Set up a git repo with a blamebot-provenance branch containing the trace
+		initProvBranch(t, dir, "mysession", map[string]string{
 			"tool_abc": "[Thinking]\nSome reasoning about the edit",
-		}
-		data, _ := json.Marshal(traces)
-		if err := os.WriteFile(filepath.Join(tracesDir, "mysession.json"), data, 0644); err != nil {
-			t.Fatal(err)
-		}
+		})
 
 		traceRef := "/some/path/mysession.jsonl#tool_abc"
 		result := ReadTraceContext(traceRef, dir)
@@ -603,18 +643,10 @@ func TestReadTraceContext(t *testing.T) {
 	t.Run("prefers committed trace over transcript", func(t *testing.T) {
 		dir := t.TempDir()
 
-		// Create committed traces with specific context
-		tracesDir := filepath.Join(dir, ".blamebot", "traces")
-		if err := os.MkdirAll(tracesDir, 0755); err != nil {
-			t.Fatal(err)
-		}
-		traces := map[string]string{
+		// Set up a git repo with a blamebot-provenance branch containing the trace
+		initProvBranch(t, dir, "sess", map[string]string{
 			"tool_abc": "committed trace context",
-		}
-		data, _ := json.Marshal(traces)
-		if err := os.WriteFile(filepath.Join(tracesDir, "sess.json"), data, 0644); err != nil {
-			t.Fatal(err)
-		}
+		})
 
 		// Also create a transcript with different context
 		lines := []string{

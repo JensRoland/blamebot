@@ -64,23 +64,16 @@ func BlameForLine(projectRoot, filePath string, line int) (*BlameInfo, error) {
 	return info, nil
 }
 
-// StagedJSONLFiles returns staged .blamebot/log/*.jsonl file paths.
-func StagedJSONLFiles(projectRoot string) ([]string, error) {
-	cmd := exec.Command("git", "diff", "--cached", "--name-only", "--", ".blamebot/log/*.jsonl")
-	cmd.Dir = projectRoot
+// ShowFile retrieves file content at a given ref (e.g., "HEAD").
+// Returns empty string and error for new files or other errors.
+func ShowFile(root, ref, file string) (string, error) {
+	cmd := exec.Command("git", "show", ref+":"+file)
+	cmd.Dir = root
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-
-	var files []string
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			files = append(files, line)
-		}
-	}
-	return files, nil
+	return string(out), nil
 }
 
 // StageFile runs git add for a file.

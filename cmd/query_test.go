@@ -1,11 +1,17 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/jensroland/git-blamebot/internal/git"
 	"github.com/jensroland/git-blamebot/internal/index"
+	"github.com/jensroland/git-blamebot/internal/linemap"
+	"github.com/jensroland/git-blamebot/internal/lineset"
+	"github.com/jensroland/git-blamebot/internal/record"
 )
 
 func TestGroupContiguous(t *testing.T) {
@@ -306,4 +312,265 @@ func TestRegionCenter(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConstrainBySimulation(t *testing.T) {
+	tests := []struct {
+		name       string
+		sim        *linemap.AdjustedRow
+		blameLines lineset.LineSet
+		expect     string
+	}{
+		{
+			name:       "intersection narrows blame to AI lines only",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(3, 4, 5)},
+			blameLines: lineset.New(3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+			expect:     "3-5",
+		},
+		{
+			name:       "no intersection falls back to blame lines",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(100, 101)},
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "nil sim returns blame lines",
+			sim:        nil,
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "superseded sim returns blame lines",
+			sim:        &linemap.AdjustedRow{Superseded: true, CurrentLines: lineset.New(3, 4, 5)},
+			blameLines: lineset.New(3, 4, 5, 6, 7),
+			expect:     "3-7",
+		},
+		{
+			name:       "empty sim lines returns blame lines",
+			sim:        &linemap.AdjustedRow{},
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "exact match returns same lines",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(3, 4, 5)},
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "partial overlap returns intersection",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(3, 4, 5, 6, 7)},
+			blameLines: lineset.New(5, 6, 7, 8, 9),
+			expect:     "5-7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := constrainBySimulation(tt.sim, tt.blameLines)
+			if got.String() != tt.expect {
+				t.Errorf("constrainBySimulation = %q, want %q", got.String(), tt.expect)
+			}
+		})
+	}
+}
+
+func TestHashOfLines(t *testing.T) {
+	fileLines := strings.Split("line 1\nline 2\nline 3\nline 4\nline 5", "\n")
+
+	t.Run("matches ContentHash of same text", func(t *testing.T) {
+		got := hashOfLines(fileLines, 2, 4)
+		want := record.ContentHash("line 2\nline 3\nline 4")
+		if got != want {
+			t.Errorf("hashOfLines = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("out of bounds returns empty", func(t *testing.T) {
+		if got := hashOfLines(fileLines, 0, 2); got != "" {
+			t.Errorf("start < 1 should return empty, got %q", got)
+		}
+		if got := hashOfLines(fileLines, 4, 6); got != "" {
+			t.Errorf("end > len should return empty, got %q", got)
+		}
+		if got := hashOfLines(fileLines, 3, 2); got != "" {
+			t.Errorf("start > end should return empty, got %q", got)
+		}
+	})
+}
+
+func TestCorrectByContentHash(t *testing.T) {
+	// Helper to create a temp file with content and return its project root
+	setup := func(t *testing.T, content string) string {
+		t.Helper()
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "test.txt"), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return dir
+	}
+
+	newLines := func(n int) *int { return &n }
+	lineStart := func(n int) *int { return &n }
+
+	t.Run("position correct — no change", func(t *testing.T) {
+		// AI content is at lines 3-5 as simulated
+		content := "line 1\nline 2\nAI one\nAI two\nAI three\nline 6\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two\nAI three"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(3),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(3, 5))
+		if got.String() != "3-5" {
+			t.Errorf("expected 3-5, got %s", got.String())
+		}
+	})
+
+	t.Run("manual insert above shifts AI content down", func(t *testing.T) {
+		// AI wrote lines 3-5 but 3 manual lines were inserted at top
+		// AI content is now at lines 6-8
+		content := "manual 1\nmanual 2\nmanual 3\nline 1\nline 2\nAI one\nAI two\nAI three\nline 6\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two\nAI three"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(3),
+			Tool:        "Edit",
+		}
+		// Simulation thinks lines 3-5, but actual is 6-8
+		got := correctByContentHash(root, row, lineset.FromRange(3, 5))
+		if got.String() != "6-8" {
+			t.Errorf("expected 6-8, got %s", got.String())
+		}
+	})
+
+	t.Run("manual delete above shifts AI content up", func(t *testing.T) {
+		// AI wrote lines 10-12 but 3 lines were deleted above
+		// AI content is now at lines 7-9
+		content := "line 1\nline 2\nline 3\nline 7\nline 8\nline 9\nAI one\nAI two\nAI three\nline 13\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two\nAI three"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(3),
+			Tool:        "Edit",
+		}
+		// Simulation thinks lines 10-12, but actual is 7-9
+		got := correctByContentHash(root, row, lineset.FromRange(10, 12))
+		if got.String() != "7-9" {
+			t.Errorf("expected 7-9, got %s", got.String())
+		}
+	})
+
+	t.Run("content modified — returns empty (superseded)", func(t *testing.T) {
+		// AI wrote "AI one\nAI two\nAI three" but user modified it
+		content := "line 1\nline 2\nmodified one\nmodified two\nmodified three\nline 6\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two\nAI three"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(3),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(3, 5))
+		// Content not found anywhere — should return empty (superseded)
+		if !got.IsEmpty() {
+			t.Errorf("expected empty (superseded), got %s", got.String())
+		}
+	})
+
+	t.Run("empty ContentHash — no correction", func(t *testing.T) {
+		root := setup(t, "line 1\nline 2\n")
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: "",
+			NewLines:    newLines(1),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(1, 1))
+		if got.String() != "1" {
+			t.Errorf("expected 1, got %s", got.String())
+		}
+	})
+
+	t.Run("Write tool — skipped", func(t *testing.T) {
+		root := setup(t, "line 1\nline 2\n")
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash("line 1"),
+			NewLines:    newLines(1),
+			Tool:        "Write",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(5, 5))
+		if got.String() != "5" {
+			t.Errorf("expected 5 (no correction for Write), got %s", got.String())
+		}
+	})
+
+	t.Run("nil NewLines — no correction", func(t *testing.T) {
+		root := setup(t, "line 1\nline 2\n")
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash("line 1"),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(1, 1))
+		if got.String() != "1" {
+			t.Errorf("expected 1, got %s", got.String())
+		}
+	})
+
+	t.Run("file deleted — returns empty (superseded)", func(t *testing.T) {
+		row := &index.ReasonRow{
+			File:        "nonexistent.txt",
+			ContentHash: record.ContentHash("test"),
+			NewLines:    newLines(1),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash("/no/such/dir", row, lineset.FromRange(1, 1))
+		if !got.IsEmpty() {
+			t.Errorf("expected empty (superseded), got %s", got.String())
+		}
+	})
+
+	t.Run("AI lines deleted from file — returns empty (superseded)", func(t *testing.T) {
+		// AI wrote 3 lines, user deleted them entirely
+		content := "line 1\nline 2\nline 6\nline 7\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two\nAI three"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(3),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(3, 5))
+		if !got.IsEmpty() {
+			t.Errorf("expected empty (superseded) for deleted content, got %s", got.String())
+		}
+	})
+
+	t.Run("empty simLines with LineStart — searches from original", func(t *testing.T) {
+		content := "line 1\nline 2\nAI one\nAI two\nline 5\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(2),
+			LineStart:   lineStart(3),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.LineSet{})
+		if got.String() != "3-4" {
+			t.Errorf("expected 3-4, got %s", got.String())
+		}
+	})
 }

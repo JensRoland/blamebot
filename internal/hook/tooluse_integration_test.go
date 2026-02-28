@@ -4,45 +4,31 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/jensroland/git-blamebot/internal/record"
+	"github.com/jensroland/git-blamebot/internal/provenance"
 )
 
 // TestHandlePostToolUse_EndToEnd tests the full pipeline:
-// construct a Claude Code hook payload → HandlePostToolUse() → verify JSONL output.
+// construct a Claude Code hook payload → HandlePostToolUse() → verify pending edit output.
 func TestHandlePostToolUse_EndToEnd(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	// Create the required directory structure
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".blamebot", "log"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git", "blamebot"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	initGitRepo(t, tmpDir)
 
 	// Write current_prompt.json with session state
 	ps := promptState{
 		Prompt:         "fix the bug in handler",
-		SessionFile:    "test-session.jsonl",
 		Author:         "claude-test",
 		SessionID:      "session-abc",
 		TranscriptPath: "/transcript/path",
 	}
 	psBytes, _ := json.Marshal(ps)
-	if err := os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644)
 
-	// Set CLAUDE_PROJECT_DIR so FindRoot() uses our temp dir
-	old := os.Getenv("CLAUDE_PROJECT_DIR")
 	t.Setenv("CLAUDE_PROJECT_DIR", tmpDir)
-	defer func() { _ = os.Setenv("CLAUDE_PROJECT_DIR", old) }()
 
-	// Build an Edit tool payload
 	payload := map[string]interface{}{
 		"tool_name": "Edit",
 		"tool_input": map[string]interface{}{
@@ -64,89 +50,53 @@ func TestHandlePostToolUse_EndToEnd(t *testing.T) {
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
-	err := HandlePostToolUse(bytes.NewReader(payloadBytes))
-	if err != nil {
+	if err := HandlePostToolUse(bytes.NewReader(payloadBytes)); err != nil {
 		t.Fatal(err)
 	}
 
-	// Read the output JSONL file
-	sessionPath := filepath.Join(tmpDir, ".blamebot", "log", "test-session.jsonl")
-	data, err := os.ReadFile(sessionPath)
-	if err != nil {
-		t.Fatalf("session file not created: %v", err)
+	edits, err := provenance.ReadAllPending(filepath.Join(tmpDir, ".git"))
+	if err != nil || len(edits) != 1 {
+		t.Fatalf("expected 1 pending edit, got %d (err=%v)", len(edits), err)
 	}
 
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("expected 1 record, got %d", len(lines))
-	}
+	pe := edits[0]
 
-	// Parse the output record
-	var rec record.Record
-	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
-		t.Fatalf("failed to parse record: %v", err)
+	if pe.File != "src/main.go" {
+		t.Errorf("file = %q, want %q", pe.File, "src/main.go")
 	}
-
-	// Verify file path is relativized
-	if rec.File != "src/main.go" {
-		t.Errorf("file = %q, want %q", rec.File, "src/main.go")
-	}
-
-	// Verify lines — LCS should identify only line 12 as changed
-	// (second line of the 2-line edit; structuredPatch newStart=10 is 0-indexed → 1-indexed 11)
-	if rec.Lines.IsEmpty() {
+	if pe.Lines.IsEmpty() {
 		t.Fatal("lines should not be empty")
 	}
-	gotLines := rec.Lines.Lines()
+	gotLines := pe.Lines.Lines()
 	if len(gotLines) != 1 || gotLines[0] != 12 {
 		t.Errorf("lines = %v, want [12]", gotLines)
 	}
-
-	// Verify hunk metadata (0-indexed patch values converted to 1-indexed)
-	if rec.Hunk == nil {
+	if pe.Hunk == nil {
 		t.Fatal("hunk should not be nil")
 	}
-	if rec.Hunk.OldStart != 11 || rec.Hunk.OldLines != 2 {
-		t.Errorf("hunk = %+v, want OldStart=11 OldLines=2", *rec.Hunk)
+	if pe.Hunk.OldStart != 11 || pe.Hunk.OldLines != 2 {
+		t.Errorf("hunk = %+v, want OldStart=11 OldLines=2", *pe.Hunk)
 	}
-	if rec.Hunk.NewStart != 11 || rec.Hunk.NewLines != 2 {
-		t.Errorf("hunk = %+v, want NewStart=11 NewLines=2", *rec.Hunk)
-	}
-
-	// Verify content hash is set
-	if rec.ContentHash == "" {
+	if pe.ContentHash == "" {
 		t.Error("content_hash should not be empty")
 	}
-
-	// Verify prompt state was carried through
-	if rec.Prompt != "fix the bug in handler" {
-		t.Errorf("prompt = %q", rec.Prompt)
+	if pe.Prompt != "fix the bug in handler" {
+		t.Errorf("prompt = %q", pe.Prompt)
 	}
-	if rec.Author != "claude-test" {
-		t.Errorf("author = %q", rec.Author)
+	if pe.Author != "claude-test" {
+		t.Errorf("author = %q", pe.Author)
 	}
-	if rec.Session != "session-abc" {
-		t.Errorf("session = %q", rec.Session)
+	if pe.Session != "session-abc" {
+		t.Errorf("session = %q", pe.Session)
 	}
-
-	// Verify trace reference includes tool_use_id
-	if rec.Trace != "/transcript/path#tool-123" {
-		t.Errorf("trace = %q, want %q", rec.Trace, "/transcript/path#tool-123")
+	if pe.Trace != "/transcript/path#tool-123" {
+		t.Errorf("trace = %q, want %q", pe.Trace, "/transcript/path#tool-123")
 	}
-
-	// Verify tool name
-	if rec.Tool != "Edit" {
-		t.Errorf("tool = %q", rec.Tool)
+	if pe.Tool != "Edit" {
+		t.Errorf("tool = %q", pe.Tool)
 	}
-
-	// Verify change summary is not empty
-	if rec.Change == "" {
+	if pe.Change == "" {
 		t.Error("change should not be empty")
-	}
-
-	// Verify timestamp is set
-	if rec.Ts == "" {
-		t.Error("ts should not be empty")
 	}
 }
 
@@ -154,26 +104,13 @@ func TestHandlePostToolUse_EndToEnd(t *testing.T) {
 // produces a full-file LineSet and correct hunk metadata.
 func TestHandlePostToolUse_WriteCreatesFullRange(t *testing.T) {
 	tmpDir := t.TempDir()
+	initGitRepo(t, tmpDir)
 
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".blamebot", "log"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git", "blamebot"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	ps := promptState{
-		SessionFile: "write-session.jsonl",
-		Author:      "test",
-	}
+	ps := promptState{Author: "test"}
 	psBytes, _ := json.Marshal(ps)
-	if err := os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644); err != nil {
-		t.Fatal(err)
-	}
+	_ = os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644)
 
-	old := os.Getenv("CLAUDE_PROJECT_DIR")
 	t.Setenv("CLAUDE_PROJECT_DIR", tmpDir)
-	defer func() { _ = os.Setenv("CLAUDE_PROJECT_DIR", old) }()
 
 	payload := map[string]interface{}{
 		"tool_name": "Write",
@@ -184,63 +121,65 @@ func TestHandlePostToolUse_WriteCreatesFullRange(t *testing.T) {
 	}
 
 	payloadBytes, _ := json.Marshal(payload)
-	err := HandlePostToolUse(bytes.NewReader(payloadBytes))
-	if err != nil {
+	if err := HandlePostToolUse(bytes.NewReader(payloadBytes)); err != nil {
 		t.Fatal(err)
 	}
 
-	sessionPath := filepath.Join(tmpDir, ".blamebot", "log", "write-session.jsonl")
-	data, err := os.ReadFile(sessionPath)
-	if err != nil {
-		t.Fatalf("session file not created: %v", err)
+	edits, err := provenance.ReadAllPending(filepath.Join(tmpDir, ".git"))
+	if err != nil || len(edits) != 1 {
+		t.Fatalf("expected 1 pending edit, got %d", len(edits))
 	}
 
-	var rec record.Record
-	if err := json.Unmarshal([]byte(strings.TrimSpace(string(data))), &rec); err != nil {
-		t.Fatalf("failed to parse record: %v", err)
-	}
-
-	// Write creates full range: 5 lines (4 newlines + 1)
-	gotLines := rec.Lines.Lines()
+	pe := edits[0]
+	gotLines := pe.Lines.Lines()
 	if len(gotLines) != 5 {
 		t.Errorf("lines = %v, want [1 2 3 4 5]", gotLines)
 	}
-	if len(gotLines) > 0 && (gotLines[0] != 1 || gotLines[len(gotLines)-1] != 5) {
-		t.Errorf("lines range = %d-%d, want 1-5", gotLines[0], gotLines[len(gotLines)-1])
-	}
-
-	// Write should have hunk with OldLines=0
-	if rec.Hunk == nil {
+	if pe.Hunk == nil {
 		t.Fatal("hunk should not be nil for Write")
 	}
-	if rec.Hunk.OldLines != 0 || rec.Hunk.NewLines != 5 {
-		t.Errorf("hunk = %+v, want OldLines=0 NewLines=5", *rec.Hunk)
+	if pe.Hunk.OldLines != 0 || pe.Hunk.NewLines != 5 {
+		t.Errorf("hunk = %+v, want OldLines=0 NewLines=5", *pe.Hunk)
 	}
 }
 
 // TestHandlePostToolUse_NotInitialized verifies that HandlePostToolUse
-// returns nil without writing anything when .blamebot/ doesn't exist.
+// returns nil without writing anything when not initialized.
 func TestHandlePostToolUse_NotInitialized(t *testing.T) {
 	tmpDir := t.TempDir()
+	// Create bare .git but NO provenance branch and no .blamebot/
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".git", "blamebot"), 0o755)
 
-	// Create .git/blamebot but NOT .blamebot/
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".git", "blamebot"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	old := os.Getenv("CLAUDE_PROJECT_DIR")
 	t.Setenv("CLAUDE_PROJECT_DIR", tmpDir)
-	defer func() { _ = os.Setenv("CLAUDE_PROJECT_DIR", old) }()
 
 	payload := `{"tool_name":"Edit","tool_input":{"file_path":"x.go","old_string":"a","new_string":"b"}}`
-	err := HandlePostToolUse(bytes.NewReader([]byte(payload)))
-	if err != nil {
+	if err := HandlePostToolUse(bytes.NewReader([]byte(payload))); err != nil {
 		t.Fatalf("expected nil error, got %v", err)
 	}
 
-	// No .blamebot/log should be created
-	_, err = os.Stat(filepath.Join(tmpDir, ".blamebot", "log"))
-	if err == nil {
-		t.Error(".blamebot/log should not exist when not initialized")
+	if provenance.HasPending(filepath.Join(tmpDir, ".git")) {
+		t.Error("pending edits should not exist when not initialized")
+	}
+}
+
+func initGitRepo(t *testing.T, dir string) {
+	t.Helper()
+	run(t, dir, "git", "init")
+	run(t, dir, "git", "config", "user.name", "Test")
+	run(t, dir, "git", "config", "user.email", "test@test.com")
+	run(t, dir, "git", "commit", "--allow-empty", "-m", "init")
+	if err := provenance.InitBranch(dir); err != nil {
+		t.Fatalf("InitBranch: %v", err)
+	}
+	_ = os.MkdirAll(filepath.Join(dir, ".git", "blamebot"), 0o755)
+}
+
+func run(t *testing.T, dir, name string, args ...string) {
+	t.Helper()
+	cmd := exec.Command(name, args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s %v: %v\n%s", name, args, err, out)
 	}
 }

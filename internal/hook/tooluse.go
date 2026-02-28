@@ -9,9 +9,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jensroland/git-blamebot/internal/checkpoint"
 	"github.com/jensroland/git-blamebot/internal/debug"
 	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
 	"github.com/jensroland/git-blamebot/internal/record"
 )
 
@@ -63,24 +66,12 @@ func HandlePostToolUse(r io.Reader) error {
 	})
 
 	// Load stashed prompt state
-	stateFile := filepath.Join(paths.CacheDir, "current_prompt.json")
+	stateFile := fmt.Sprintf("%s/current_prompt.json", paths.CacheDir)
 	var ps promptState
 	if b, err := os.ReadFile(stateFile); err == nil {
 		_ = json.Unmarshal(b, &ps)
 	}
 	debug.Log(paths.CacheDir, "hook.log", "Loaded prompt state", ps)
-
-	// Determine session file
-	sessionFilename := ps.SessionFile
-	if sessionFilename == "" {
-		now := time.Now().UTC()
-		ts := now.Format("20060102T150405Z")
-		randStr := randomString(6)
-		sessionFilename = fmt.Sprintf("%s-%s-orphan.jsonl", ts, randStr)
-		debug.Log(paths.CacheDir, "hook.log", fmt.Sprintf("No session file in prompt state, fallback: %s", sessionFilename), nil)
-	}
-
-	sessionPath := filepath.Join(paths.LogDir, sessionFilename)
 
 	// Extract edit records
 	edits := extractEdits(data, root)
@@ -110,41 +101,51 @@ func HandlePostToolUse(r io.Reader) error {
 		author = "unknown"
 	}
 
-	_ = os.MkdirAll(paths.LogDir, 0o755)
-
-	f, err := os.OpenFile(sessionPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		debug.Log(paths.CacheDir, "hook.log", fmt.Sprintf("Failed to open session file: %v", err), nil)
-		return nil
-	}
-	defer f.Close()
+	pendingDir := provenance.PendingDir(paths.GitDir)
+	_ = os.MkdirAll(pendingDir, 0o755)
 
 	recordsWritten := 0
 	for _, edit := range edits {
-		rec := record.Record{
+		pe := provenance.PendingEdit{
+			ID:          uuid.New().String(),
 			Ts:          now,
 			File:        edit.File,
 			Lines:       edit.Lines,
 			Hunk:        edit.Hunk,
 			ContentHash: edit.ContentHash,
 			Prompt:      ps.Prompt,
-			Reason:      "",
 			Change:      edit.Change,
 			Tool:        toolName,
 			Author:      author,
 			Session:     sessionID,
 			Trace:       traceRef,
 		}
-
-		b, err := json.Marshal(rec)
-		if err != nil {
+		if err := provenance.WritePending(paths.GitDir, pe); err != nil {
+			debug.Log(paths.CacheDir, "hook.log",
+				fmt.Sprintf("Failed to write pending edit: %v", err), nil)
 			continue
 		}
-		fmt.Fprintf(f, "%s\n", b)
+
+		// Write post-edit checkpoint
+		absFile := filepath.Join(root, edit.File)
+		if content, err := os.ReadFile(absFile); err == nil {
+			contentSHA, err := checkpoint.WriteBlob(paths.CheckpointDir, string(content))
+			if err == nil {
+				_, _ = checkpoint.WriteCheckpoint(paths.CheckpointDir, checkpoint.Checkpoint{
+					Kind:       "post-edit",
+					File:       edit.File,
+					ContentSHA: contentSHA,
+					EditID:     pe.ID,
+					ToolUseID:  toolUseID,
+					Ts:         pe.Ts,
+				})
+			}
+		}
+
 		recordsWritten++
 	}
 
-	debug.Log(paths.CacheDir, "hook.log", fmt.Sprintf("Wrote %d record(s) to %s", recordsWritten, sessionPath), nil)
+	debug.Log(paths.CacheDir, "hook.log", fmt.Sprintf("Wrote %d pending edit(s)", recordsWritten), nil)
 	return nil
 }
 

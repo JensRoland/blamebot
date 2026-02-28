@@ -176,58 +176,6 @@ func TestBlameFile_Uncommitted(t *testing.T) {
 	}
 }
 
-func TestBlameJSONLLines(t *testing.T) {
-	jsonl := `{"file":"a.go","ts":"2025-01-01T00:00:00Z","change":"test1"}
-{"file":"b.go","ts":"2025-01-02T00:00:00Z","change":"test2"}
-`
-	dir := setupGitRepo(t, ".blamebot/log/session.jsonl", jsonl)
-
-	result, err := BlameJSONLLines(dir, ".blamebot/log/session.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if len(result) != 2 {
-		t.Errorf("expected 2 entries, got %d", len(result))
-	}
-
-	// Both lines should have the same commit SHA
-	if result[1] == "" || result[2] == "" {
-		t.Error("expected non-empty SHAs")
-	}
-	if result[1] != result[2] {
-		t.Errorf("expected same SHA for both lines: %s vs %s", result[1], result[2])
-	}
-}
-
-func TestBlameJSONLLines_Uncommitted(t *testing.T) {
-	// Start with one committed record
-	jsonl1 := `{"file":"a.go","ts":"2025-01-01T00:00:00Z","change":"test1"}
-`
-	dir := setupGitRepo(t, ".blamebot/log/session.jsonl", jsonl1)
-
-	// Append an uncommitted record
-	jsonl2 := `{"file":"a.go","ts":"2025-01-01T00:00:00Z","change":"test1"}
-{"file":"b.go","ts":"2025-01-02T00:00:00Z","change":"test2"}
-`
-	if err := os.WriteFile(filepath.Join(dir, ".blamebot/log/session.jsonl"), []byte(jsonl2), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	result, err := BlameJSONLLines(dir, ".blamebot/log/session.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Line 1 should be committed, line 2 should be absent (uncommitted)
-	if result[1] == "" {
-		t.Error("line 1 should have a commit SHA")
-	}
-	if result[2] != "" {
-		t.Errorf("line 2 should not have a commit SHA (uncommitted), got %s", result[2])
-	}
-}
-
 func TestHeadSHA(t *testing.T) {
 	dir := setupGitRepo(t, "test.txt", "hello\n")
 

@@ -21,40 +21,33 @@ func setupTestDB(t *testing.T) (*sql.DB, project.Paths, string) {
 
 	tmpDir := t.TempDir()
 
-	logDir := filepath.Join(tmpDir, ".blamebot", "log")
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	pendingDir := filepath.Join(cacheDir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	paths := project.Paths{
-		Root:     tmpDir,
-		LogDir:   logDir,
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: pendingDir,
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 
-	// Write sample JSONL records with known data.
+	// Write sample pending edit records with known data.
 	// Session 1: alice's work on src/main.go
-	session1 := strings.Join([]string{
-		`{"file":"src/main.go","lines":"5-10","ts":"2025-01-01T00:00:00Z","prompt":"fix authentication bug","reason":"Fixed auth token validation","change":"Replaced broken token check with proper JWT validation","tool":"Edit","author":"alice","session":"sess-aaa","trace":"traces/sess-aaa#tool-1","content_hash":"hash1"}`,
-		`{"file":"src/main.go","lines":"20","ts":"2025-01-15T00:00:00Z","prompt":"add logging to main","reason":"","change":"Added structured logging to request handler","tool":"Edit","author":"alice","session":"sess-aaa","trace":"","content_hash":"hash2"}`,
-	}, "\n") + "\n"
-
+	pending1 := `{"file":"src/main.go","lines":"5-10","ts":"2025-01-01T00:00:00Z","prompt":"fix authentication bug","reason":"Fixed auth token validation","change":"Replaced broken token check with proper JWT validation","tool":"Edit","author":"alice","session":"sess-aaa","trace":"traces/sess-aaa#tool-1","content_hash":"hash1"}`
+	pending2 := `{"file":"src/main.go","lines":"20","ts":"2025-01-15T00:00:00Z","prompt":"add logging to main","reason":"","change":"Added structured logging to request handler","tool":"Edit","author":"alice","session":"sess-aaa","trace":"","content_hash":"hash2"}`
 	// Session 2: bob's work on src/handler.go
-	session2 := strings.Join([]string{
-		`{"file":"src/handler.go","lines":"1-3","ts":"2025-02-01T00:00:00Z","prompt":"refactor handler for clarity","reason":"Simplified handler interface","change":"Refactored handler to use middleware pattern","tool":"Write","author":"bob","session":"sess-bbb","trace":"traces/sess-bbb#tool-1","content_hash":"hash3"}`,
-		`{"file":"src/handler.go","lines":"15-20","ts":"2025-02-01T00:01:00Z","prompt":"add error handling","reason":"","change":"Added proper error propagation in handler chain","tool":"Edit","author":"bob","session":"sess-bbb","trace":"","content_hash":"hash4"}`,
-	}, "\n") + "\n"
+	pending3 := `{"file":"src/handler.go","lines":"1-3","ts":"2025-02-01T00:00:00Z","prompt":"refactor handler for clarity","reason":"Simplified handler interface","change":"Refactored handler to use middleware pattern","tool":"Write","author":"bob","session":"sess-bbb","trace":"traces/sess-bbb#tool-1","content_hash":"hash3"}`
+	pending4 := `{"file":"src/handler.go","lines":"15-20","ts":"2025-02-01T00:01:00Z","prompt":"add error handling","reason":"","change":"Added proper error propagation in handler chain","tool":"Edit","author":"bob","session":"sess-bbb","trace":"","content_hash":"hash4"}`
 
-	if err := os.WriteFile(filepath.Join(logDir, "aaa-session1.jsonl"), []byte(session1), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(logDir, "bbb-session2.jsonl"), []byte(session2), 0o644); err != nil {
-		t.Fatal(err)
+	for i, data := range []string{pending1, pending2, pending3, pending4} {
+		fname := filepath.Join(pendingDir, fmt.Sprintf("edit-%d.json", i+1))
+		if err := os.WriteFile(fname, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	db, err := index.Rebuild(paths, true)
@@ -293,7 +286,7 @@ func TestCmdFile_Found(t *testing.T) {
 	defer db.Close()
 
 	out := captureStdout(t, func() {
-		cmdFile(db, "src/main.go", root, "", false, false)
+		cmdFile(db, "src/main.go", root, "", false, false, true)
 	})
 
 	if !strings.Contains(out, "src/main.go") {
@@ -306,7 +299,7 @@ func TestCmdFile_NotFound(t *testing.T) {
 	defer db.Close()
 
 	out := captureStdout(t, func() {
-		cmdFile(db, "nonexistent.go", root, "", false, false)
+		cmdFile(db, "nonexistent.go", root, "", false, false, true)
 	})
 
 	if !strings.Contains(out, "No reasons found for") {
@@ -319,7 +312,7 @@ func TestCmdFile_JSON(t *testing.T) {
 	defer db.Close()
 
 	out := captureStdout(t, func() {
-		cmdFile(db, "src/main.go", root, "", false, true)
+		cmdFile(db, "src/main.go", root, "", false, true, true)
 	})
 
 	var result []interface{}

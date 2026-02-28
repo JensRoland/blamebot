@@ -4,20 +4,9 @@ Improvements to make blamebot a more complete provenance tool for AI-authored co
 
 ## Shadow branch storage
 
-**Status**: Exploratory
+**Status**: Done
 
-Currently, JSONL logs are committed directly into the repo under `.blamebot/log/`. This is simple and portable — anyone who clones gets the full history — but it pollutes commit diffs, inflates repo size over time, and creates merge surface area even with `merge=union`.
-
-**Proposal**: Store JSONL logs on a dedicated `blamebot/v1` ref instead of in the working tree.
-
-- `hook.py` writes to a staging area (`.git/blamebot/pending/`)
-- A post-commit or pre-push hook commits pending records to the shadow branch via `git hash-object` / `git update-ref` (no checkout needed)
-- `git blamebot` queries the shadow branch directly (read tree objects, or check out into a temp dir for SQLite indexing)
-- The shadow branch is pushed/pulled alongside normal branches
-
-**DX impact**: Slight. Developers no longer see `.blamebot/` in `git status` or diffs. The tradeoff is that cloning alone won't surface the data — you'd need to fetch the ref. A `git blamebot init --fetch` could handle that. Net positive for teams who find the committed logs noisy.
-
-**Risk**: More moving parts. The current approach "just works" because JSONL files are regular committed files. Shadow branches need careful handling around shallow clones, CI environments, and force-pushes. Worth prototyping before committing to.
+Provenance data is now stored on a dedicated `blamebot-provenance` branch. Manifests are written via `git hash-object` / `git update-ref` at commit time (no checkout needed). The branch is pushed/pulled alongside normal branches via the `pre-push` hook. `git-blamebot enable` auto-fetches the branch from origin if it exists.
 
 ## Multi-agent support
 
@@ -45,7 +34,7 @@ The hooks currently assume Claude Code's specific payload structure (`session_id
 
 This is worth doing even if we only add one more agent. The refactoring itself will make the Claude Code path more robust by separating payload parsing from business logic.
 
-Note: [Git AI's approach](https://usegitai.com/docs/cli/how-git-ai-works) is to have the agents set 'checkpoints' before and after every edit. That is a pragmatic way to go about it, and makes integration fairly easy, even for agents without native support for hooks.
+Note: blamebot now uses a similar checkpoint approach to [Git AI](https://usegitai.com/docs/cli/how-git-ai-works) — snapshotting files before and after every edit. This makes multi-agent integration easier since any agent with pre/post-edit hooks can feed the same attribution pipeline.
 
 Cursor hooks: <https://cursor.com/docs/agent/hooks>
 Gemini CLI hooks: <https://geminicli.com/docs/hooks/>

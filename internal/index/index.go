@@ -1,20 +1,15 @@
 package index
 
 import (
-	"bufio"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
-	"strings"
 
 	_ "modernc.org/sqlite"
 
 	"github.com/jensroland/git-blamebot/internal/git"
-	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
 )
 
 // ReasonRow mirrors a row from the reasons table.
@@ -41,12 +36,6 @@ type ReasonRow struct {
 	CommitSHA    string
 }
 
-// sourceRef tracks the JSONL source file and line number for a record.
-type sourceRef struct {
-	sourceFile string
-	lineNum    int
-}
-
 // ScanRow scans a *sql.Rows into a ReasonRow.
 func ScanRow(rows *sql.Rows) (*ReasonRow, error) {
 	r := &ReasonRow{}
@@ -62,39 +51,37 @@ func ScanRow(rows *sql.Rows) (*ReasonRow, error) {
 
 // IsStale returns true if the index needs rebuilding.
 func IsStale(paths project.Paths) bool {
-	info, err := os.Stat(paths.IndexDB)
-	if err != nil {
-		return true
-	}
-	indexMtime := info.ModTime()
-
-	entries, err := os.ReadDir(paths.LogDir)
-	if err != nil {
-		return false
-	}
-
-	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".jsonl") {
-			continue
-		}
-		fInfo, err := e.Info()
-		if err != nil {
-			continue
-		}
-		if fInfo.ModTime().After(indexMtime) {
-			return true
-		}
-	}
-
-	// Check if HEAD has changed (rebase, amend, etc.)
-	if headSHAChanged(paths) {
+	if _, err := os.Stat(paths.IndexDB); err != nil {
 		return true
 	}
 
-	return false
+	db, err := sql.Open("sqlite", paths.IndexDB)
+	if err != nil {
+		return true
+	}
+	defer db.Close()
+
+	// Check provenance branch tip SHA
+	var storedProvSHA string
+	db.QueryRow("SELECT value FROM meta WHERE key = 'prov_tip_sha'").Scan(&storedProvSHA)
+	currentProvSHA := provenance.BranchTipSHA(paths.Root)
+	if currentProvSHA != storedProvSHA {
+		return true
+	}
+
+	// Check HEAD
+	if headSHAChanged(db, paths.Root) {
+		return true
+	}
+
+	// Check pending edits
+	currentPending := countPendingFiles(paths.PendingDir)
+	var storedPending int
+	db.QueryRow("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'pending_count'").Scan(&storedPending)
+	return currentPending != storedPending
 }
 
-// Rebuild drops and recreates the SQLite index from JSONL files.
+// Rebuild drops and recreates the SQLite index from provenance branch manifests.
 func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 	if err := os.MkdirAll(paths.CacheDir, 0o755); err != nil {
 		return nil, fmt.Errorf("cannot create cache dir %s: %w", paths.CacheDir, err)
@@ -149,169 +136,146 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 	}
 
 	recordCount := 0
-	fileCount := 0
+	manifestCount := 0
 
-	var insertedRefs []sourceRef
+	tx, err := db.Begin()
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 
-	if _, err := os.Stat(paths.LogDir); err == nil {
-		entries, _ := os.ReadDir(paths.LogDir)
+	stmt, err := tx.Prepare(`
+		INSERT INTO reasons
+		(file, line_start, line_end, content_hash, ts,
+		 prompt, reason, change, tool, author, session, trace, source_file,
+		 old_start, old_lines, new_start, new_lines, changed_lines, commit_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	if err != nil {
+		tx.Rollback()
+		db.Close()
+		return nil, err
+	}
+	defer stmt.Close()
 
-		// Sort by name for deterministic ordering
-		sort.Slice(entries, func(i, j int) bool {
-			return entries[i].Name() < entries[j].Name()
-		})
-
-		tx, err := db.Begin()
-		if err != nil {
-			db.Close()
-			return nil, err
-		}
-
-		stmt, err := tx.Prepare(`
-			INSERT INTO reasons
-			(file, line_start, line_end, content_hash, ts,
-			 prompt, reason, change, tool, author, session, trace, source_file,
-			 old_start, old_lines, new_start, new_lines, changed_lines, commit_sha)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`)
-		if err != nil {
-			tx.Rollback()
-			db.Close()
-			return nil, err
-		}
-		defer stmt.Close()
-
-		for _, e := range entries {
-			if !strings.HasSuffix(e.Name(), ".jsonl") {
-				continue
-			}
-			fileCount++
-
-			jsonlPath := filepath.Join(paths.LogDir, e.Name())
-			f, err := os.Open(jsonlPath)
-			if err != nil {
-				continue
+	// Process committed manifests from provenance branch
+	manifests, _ := provenance.ReadAllManifests(paths.Root)
+	for _, m := range manifests {
+		manifestCount++
+		for _, edit := range m.Edits {
+			// Parse lines
+			var lineStart, lineEnd *int
+			var changedLines *string
+			if !edit.Lines.IsEmpty() {
+				s := edit.Lines.String()
+				changedLines = &s
+				mn := edit.Lines.Min()
+				mx := edit.Lines.Max()
+				lineStart = &mn
+				lineEnd = &mx
 			}
 
-			scanner := bufio.NewScanner(f)
-			scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
-			jsonlLineNum := 0
-			for scanner.Scan() {
-				jsonlLineNum++
-				line := strings.TrimSpace(scanner.Text())
-				if line == "" {
-					continue
-				}
-
-				var rec map[string]interface{}
-				if err := json.Unmarshal([]byte(line), &rec); err != nil {
-					continue
-				}
-
-				// Parse lines: new string format ("5,7-8,12") or legacy array ([5,12])
-				var lineStart, lineEnd *int
-				var changedLines *string
-				if linesVal, ok := rec["lines"]; ok && linesVal != nil {
-					switch lv := linesVal.(type) {
-					case string:
-						// New format: compact LineSet notation
-						if lv != "" {
-							changedLines = &lv
-							ls, err := lineset.FromString(lv)
-							if err == nil && !ls.IsEmpty() {
-								mn := ls.Min()
-								mx := ls.Max()
-								lineStart = &mn
-								lineEnd = &mx
-							}
-						}
-					case []interface{}:
-						// Legacy format: [start, end]
-						if len(lv) > 0 {
-							if v, ok := lv[0].(float64); ok {
-								n := int(v)
-								lineStart = &n
-							}
-						}
-						if len(lv) > 1 {
-							if v, ok := lv[1].(float64); ok {
-								n := int(v)
-								lineEnd = &n
-							}
-						}
-					}
-				}
-
-				change := getStr(rec, "change")
-				if change == "" {
-					change = getStr(rec, "reason")
-				}
-
-				// Extract hunk info if present
-				var oldStart, oldLines, newStart, newLines *int
-				if hunk, ok := rec["hunk"].(map[string]interface{}); ok {
-					if v, ok := hunk["old_start"].(float64); ok {
-						n := int(v)
-						oldStart = &n
-					}
-					if v, ok := hunk["old_lines"].(float64); ok {
-						n := int(v)
-						oldLines = &n
-					}
-					if v, ok := hunk["new_start"].(float64); ok {
-						n := int(v)
-						newStart = &n
-					}
-					if v, ok := hunk["new_lines"].(float64); ok {
-						n := int(v)
-						newLines = &n
-					}
-				}
-
-				stmt.Exec(
-					getStr(rec, "file"),
-					lineStart,
-					lineEnd,
-					getStr(rec, "content_hash"),
-					getStr(rec, "ts"),
-					getStr(rec, "prompt"),
-					getStr(rec, "reason"),
-					change,
-					getStr(rec, "tool"),
-					getStr(rec, "author"),
-					getStr(rec, "session"),
-					getStr(rec, "trace"),
-					e.Name(),
-					oldStart,
-					oldLines,
-					newStart,
-					newLines,
-					changedLines,
-					"", // commit_sha populated below via git blame
-				)
-				insertedRefs = append(insertedRefs, sourceRef{
-					sourceFile: e.Name(),
-					lineNum:    jsonlLineNum,
-				})
-				recordCount++
+			// Extract hunk data
+			var oldStart, oldLines, newStart, newLines *int
+			if edit.Hunk != nil {
+				oldStart = &edit.Hunk.OldStart
+				oldLines = &edit.Hunk.OldLines
+				newStart = &edit.Hunk.NewStart
+				newLines = &edit.Hunk.NewLines
 			}
-			f.Close()
-		}
 
-		if err := tx.Commit(); err != nil {
-			db.Close()
-			return nil, err
+			change := edit.Change
+			if change == "" {
+				change = edit.Reason
+			}
+
+			stmt.Exec(
+				edit.File,
+				lineStart,
+				lineEnd,
+				edit.ContentHash,
+				m.Timestamp,
+				edit.Prompt,
+				edit.Reason,
+				change,
+				edit.Tool,
+				m.Author,
+				edit.Session,
+				edit.Trace,
+				m.ID,
+				oldStart,
+				oldLines,
+				newStart,
+				newLines,
+				changedLines,
+				m.CommitSHA,
+			)
+			recordCount++
 		}
 	}
 
-	// Populate commit_sha via git blame on JSONL files
-	populateCommitSHAs(db, paths, insertedRefs)
+	// Process pending edits (uncommitted, no commit_sha yet)
+	pendingEdits, _ := provenance.ReadAllPending(paths.GitDir)
+	for _, pe := range pendingEdits {
+		var lineStart, lineEnd *int
+		var changedLines *string
+		if !pe.Lines.IsEmpty() {
+			s := pe.Lines.String()
+			changedLines = &s
+			mn := pe.Lines.Min()
+			mx := pe.Lines.Max()
+			lineStart = &mn
+			lineEnd = &mx
+		}
 
-	// Store HEAD SHA for staleness detection
+		var oldStart, oldLines, newStart, newLines *int
+		if pe.Hunk != nil {
+			oldStart = &pe.Hunk.OldStart
+			oldLines = &pe.Hunk.OldLines
+			newStart = &pe.Hunk.NewStart
+			newLines = &pe.Hunk.NewLines
+		}
+
+		stmt.Exec(
+			pe.File,
+			lineStart,
+			lineEnd,
+			pe.ContentHash,
+			pe.Ts,
+			pe.Prompt,
+			"",
+			pe.Change,
+			pe.Tool,
+			pe.Author,
+			pe.Session,
+			pe.Trace,
+			"pending",
+			oldStart,
+			oldLines,
+			newStart,
+			newLines,
+			changedLines,
+			"", // no commit_sha for pending edits
+		)
+		recordCount++
+	}
+
+	if err := tx.Commit(); err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	storeHeadSHA(db, paths.Root)
+	storeProvTipSHA(db, paths.Root)
+	storePendingCount(db, countPendingFiles(paths.PendingDir))
 
 	if !quiet {
-		fmt.Fprintf(os.Stderr, "\033[2mIndex rebuilt: %d records from %d log files\033[0m\n\n", recordCount, fileCount)
+		msg := fmt.Sprintf("\033[2mIndex rebuilt: %d records from %d manifests", recordCount, manifestCount)
+		if len(pendingEdits) > 0 {
+			msg += fmt.Sprintf(" + %d pending", len(pendingEdits))
+		}
+		msg += "\033[0m\n\n"
+		fmt.Fprint(os.Stderr, msg)
 	}
 
 	return db, nil
@@ -329,39 +293,6 @@ func Open(paths project.Paths, forceRebuild bool) (*sql.DB, error) {
 	return db, nil
 }
 
-// populateCommitSHAs uses git blame on JSONL files to fill commit_sha for each record.
-func populateCommitSHAs(db *sql.DB, paths project.Paths, refs []sourceRef) {
-	if len(refs) == 0 {
-		return
-	}
-
-	// Group refs by source file
-	fileRefs := make(map[string][]int) // source_file → []lineNum
-	for _, ref := range refs {
-		fileRefs[ref.sourceFile] = append(fileRefs[ref.sourceFile], ref.lineNum)
-	}
-
-	// For each JSONL file, run git blame to get commit SHAs
-	for sourceFile, lineNums := range fileRefs {
-		jsonlRel := filepath.Join(".blamebot", "log", sourceFile)
-		blameMap, err := git.BlameJSONLLines(paths.Root, jsonlRel)
-		if err != nil {
-			// Not in git or other error — skip (commit_sha stays empty)
-			continue
-		}
-
-		// Update each record's commit_sha
-		for _, lineNum := range lineNums {
-			if sha, ok := blameMap[lineNum]; ok && sha != "" {
-				_, _ = db.Exec(
-					"UPDATE reasons SET commit_sha = ? WHERE source_file = ? AND id = (SELECT id FROM reasons WHERE source_file = ? ORDER BY id LIMIT 1 OFFSET ?)",
-					sha, sourceFile, sourceFile, lineNum-1,
-				)
-			}
-		}
-	}
-}
-
 // storeHeadSHA saves the current HEAD SHA for staleness detection.
 func storeHeadSHA(db *sql.DB, root string) {
 	sha := git.HeadSHA(root)
@@ -372,32 +303,35 @@ func storeHeadSHA(db *sql.DB, root string) {
 	_, _ = db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('head_sha', ?)", sha)
 }
 
+// storeProvTipSHA saves the provenance branch tip SHA for staleness detection.
+func storeProvTipSHA(db *sql.DB, root string) {
+	sha := provenance.BranchTipSHA(root)
+	_, _ = db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+	_, _ = db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('prov_tip_sha', ?)", sha)
+}
+
 // headSHAChanged returns true if HEAD has changed since the last rebuild.
-func headSHAChanged(paths project.Paths) bool {
-	db, err := sql.Open("sqlite", paths.IndexDB)
-	if err != nil {
-		return false
-	}
-	defer db.Close()
-
+func headSHAChanged(db *sql.DB, root string) bool {
 	var storedSHA string
-	err = db.QueryRow("SELECT value FROM meta WHERE key = 'head_sha'").Scan(&storedSHA)
+	err := db.QueryRow("SELECT value FROM meta WHERE key = 'head_sha'").Scan(&storedSHA)
 	if err != nil {
 		return false
 	}
-
-	currentSHA := git.HeadSHA(paths.Root)
+	currentSHA := git.HeadSHA(root)
 	return currentSHA != "" && currentSHA != storedSHA
 }
 
-func getStr(m map[string]interface{}, key string) string {
-	v, ok := m[key]
-	if !ok || v == nil {
-		return ""
+// storePendingCount saves the number of pending edit files for staleness detection.
+func storePendingCount(db *sql.DB, count int) {
+	_, _ = db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+	_, _ = db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pending_count', ?)", count)
+}
+
+// countPendingFiles counts files in the pending edits directory.
+func countPendingFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
 	}
-	s, ok := v.(string)
-	if !ok {
-		return ""
-	}
-	return s
+	return len(entries)
 }

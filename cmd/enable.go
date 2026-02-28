@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
 )
 
 // RunEnable handles the "enable" subcommand.
@@ -54,6 +55,15 @@ func enableGlobal() {
 
 	hookCmd := binaryPath + " hook post-tool-use"
 	captureCmd := binaryPath + " hook prompt-submit"
+	preToolCmd := binaryPath + " hook pre-tool-use"
+
+	// PreToolUse — replace blamebot entries
+	preTool := filterHookEntries(hooks, "PreToolUse", "git-blamebot")
+	preTool = append(preTool, map[string]interface{}{
+		"matcher": "Edit|Write|MultiEdit",
+		"hooks":   []interface{}{map[string]interface{}{"type": "command", "command": preToolCmd}},
+	})
+	hooks["PreToolUse"] = preTool
 
 	// PostToolUse — replace blamebot entries
 	postTool := filterHookEntries(hooks, "PostToolUse", "git-blamebot")
@@ -120,66 +130,64 @@ func enableRepo() {
 
 	fmt.Printf("Initializing blamebot in %s\n", projDir)
 
-	// 1. Create .blamebot/log/
-	logDir := filepath.Join(projDir, ".blamebot", "log")
-	_ = os.MkdirAll(logDir, 0o755)
-
-	// .gitattributes for clean merging
-	gitattr := filepath.Join(projDir, ".blamebot", ".gitattributes")
-	if _, err := os.Stat(gitattr); os.IsNotExist(err) {
-		_ = os.WriteFile(gitattr, []byte("*.jsonl merge=union\n"), 0o644)
-		fmt.Println("  \u2713 Created .blamebot/ with merge=union strategy")
-	} else {
-		fmt.Println("  \u2713 .blamebot/ already exists")
+	// 1. Initialize provenance branch
+	if err := provenance.InitBranch(projDir); err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating provenance branch: %v\n", err)
+		os.Exit(1)
 	}
+	fmt.Printf("  \u2713 Provenance branch '%s' initialized\n", provenance.BranchName)
 
-	// README
-	readme := filepath.Join(projDir, ".blamebot", "README")
-	if _, err := os.Stat(readme); os.IsNotExist(err) {
-		_ = os.WriteFile(readme, []byte(`This directory is maintained by blamebot.
-It tracks the prompts and reasoning behind AI-authored code edits.
-See: https://github.com/jensroland/git-blamebot
-
-JSONL files in log/ are append-only and merge cleanly across branches.
-Do not edit these files manually.
-`), 0o644)
-	}
-
-	// 2. Local cache
+	// 2. Local cache directories
+	_ = os.MkdirAll(paths.PendingDir, 0o755)
 	_ = os.MkdirAll(filepath.Join(paths.CacheDir, "logs"), 0o755)
 	fmt.Println("  \u2713 Local cache at .git/blamebot/")
 
-	// 3. Pre-commit hook
-	hookDir := filepath.Join(paths.GitDir, "hooks")
-	preCommit := filepath.Join(hookDir, "pre-commit")
-	fillMarker := "# blamebot: fill reasons"
+	// 3. Install git hooks
+	installGitHook(paths.GitDir, "commit-msg",
+		"# blamebot: bundle provenance",
+		`git-blamebot hook commit-msg "$1"`)
 
-	if data, err := os.ReadFile(preCommit); err == nil && strings.Contains(string(data), fillMarker) {
-		fmt.Println("  \u2713 Pre-commit hook already installed")
-	} else {
-		_ = os.MkdirAll(hookDir, 0o755)
-		hookContent := `
-# blamebot: fill reasons
-# Auto-generate reasons for AI edits using Claude Haiku
-if git diff --cached --name-only -- '.blamebot/log/*.jsonl' | grep -q .; then
-    git-blamebot --fill-reasons
-fi
-`
-		if _, err := os.Stat(preCommit); err == nil {
-			// Append to existing hook
-			f, err := os.OpenFile(preCommit, os.O_APPEND|os.O_WRONLY, 0o755)
-			if err == nil {
-				f.WriteString(hookContent)
-				f.Close()
-				fmt.Println("  \u2713 Appended to existing pre-commit hook")
-			}
-		} else {
-			_ = os.WriteFile(preCommit, []byte("#!/usr/bin/env bash\n"+hookContent), 0o755)
-			fmt.Println("  \u2713 Installed pre-commit hook")
-		}
-	}
+	installGitHook(paths.GitDir, "post-commit",
+		"# blamebot: backfill commit SHA",
+		"git-blamebot hook post-commit")
+
+	installGitHook(paths.GitDir, "pre-push",
+		"# blamebot: push provenance branch",
+		"git-blamebot hook pre-push")
+
+	// 4. Try to fetch provenance branch from remote (if it exists)
+	cmd := exec.Command("git", "fetch", "origin", provenance.BranchName)
+	cmd.Dir = projDir
+	_ = cmd.Run() // ignore errors — remote may not have the branch
 
 	fmt.Println()
-	fmt.Println("  Ready! Commit .blamebot/ to share reasoning with your team:")
-	fmt.Println("    git add .blamebot && git commit -m 'Initialize blamebot tracking'")
+	fmt.Println("  Ready! Provenance data will be stored on the")
+	fmt.Printf("  '%s' branch automatically.\n", provenance.BranchName)
+}
+
+// installGitHook installs or appends a blamebot section to a git hook script.
+func installGitHook(gitDir, hookName, marker, command string) {
+	hookDir := filepath.Join(gitDir, "hooks")
+	hookFile := filepath.Join(hookDir, hookName)
+
+	if data, err := os.ReadFile(hookFile); err == nil && strings.Contains(string(data), marker) {
+		fmt.Printf("  \u2713 %s hook already installed\n", hookName)
+		return
+	}
+
+	_ = os.MkdirAll(hookDir, 0o755)
+	hookContent := fmt.Sprintf("\n%s\n%s\n", marker, command)
+
+	if _, err := os.Stat(hookFile); err == nil {
+		// Append to existing hook
+		f, err := os.OpenFile(hookFile, os.O_APPEND|os.O_WRONLY, 0o755)
+		if err == nil {
+			f.WriteString(hookContent)
+			f.Close()
+			fmt.Printf("  \u2713 Appended to existing %s hook\n", hookName)
+		}
+	} else {
+		_ = os.WriteFile(hookFile, []byte("#!/usr/bin/env bash\n"+hookContent), 0o755)
+		fmt.Printf("  \u2713 Installed %s hook\n", hookName)
+	}
 }

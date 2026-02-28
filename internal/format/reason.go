@@ -70,6 +70,7 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool, adj *L
 	// Determine which lines to display and use for hash verification
 	var hashStart, hashEnd *int
 	var lines string
+	superseded := adj != nil && adj.Superseded
 	if adj != nil && !adj.CurrentLines.IsEmpty() {
 		// Show current adjusted lines only
 		lines = "L" + adj.CurrentLines.String()
@@ -78,6 +79,16 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool, adj *L
 		mx := adj.CurrentLines.Max()
 		hashStart = &mn
 		hashEnd = &mx
+	} else if superseded {
+		// Superseded: show original lines but skip hash verification
+		if row.LineStart != nil {
+			if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
+				lines = fmt.Sprintf("L%d-%d", *row.LineStart, *row.LineEnd)
+			} else {
+				lines = fmt.Sprintf("L%d", *row.LineStart)
+			}
+		}
+		// hashStart/hashEnd left nil → hash check below won't run
 	} else if row.LineStart != nil {
 		if row.LineEnd != nil && *row.LineEnd != *row.LineStart {
 			lines = fmt.Sprintf("L%d-%d", *row.LineStart, *row.LineEnd)
@@ -90,7 +101,9 @@ func FormatReason(row *index.ReasonRow, projectRoot string, verbose bool, adj *L
 
 	// Content hash match indicator
 	matchIndicator := ""
-	if row.ContentHash != "" && hashStart != nil {
+	if superseded {
+		matchIndicator = " " + Dim + "\u00d7" + Reset
+	} else if row.ContentHash != "" && hashStart != nil {
 		fp := filepath.Join(projectRoot, row.File)
 		lineEnd := *hashStart
 		if hashEnd != nil {
@@ -207,18 +220,20 @@ func RowToJSON(row *index.ReasonRow, projectRoot string, adj *LineAdjustment) ma
 
 	// Use adjusted positions for hash verification if available
 	var hashStart, hashEnd *int
+	superseded := adj != nil && adj.Superseded
 	if adj != nil && !adj.CurrentLines.IsEmpty() {
 		d["current_lines"] = adj.CurrentLines.String()
 		mn := adj.CurrentLines.Min()
 		mx := adj.CurrentLines.Max()
 		hashStart = &mn
 		hashEnd = &mx
-		if adj.Superseded {
-			d["superseded"] = true
-		}
-	} else {
+	} else if !superseded {
 		hashStart = row.LineStart
 		hashEnd = row.LineEnd
+	}
+	// hashStart/hashEnd left nil for superseded with empty lines → skip hash check
+	if superseded {
+		d["superseded"] = true
 	}
 
 	if row.ContentHash != "" && hashStart != nil {

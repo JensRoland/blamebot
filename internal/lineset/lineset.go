@@ -127,6 +127,18 @@ func (ls LineSet) Max() int {
 	return ls.lines[len(ls.lines)-1]
 }
 
+// Add returns a new LineSet with the given line number added.
+func (ls LineSet) Add(line int) LineSet {
+	if ls.Contains(line) {
+		return ls
+	}
+	lines := make([]int, len(ls.lines)+1)
+	copy(lines, ls.lines)
+	lines[len(ls.lines)] = line
+	sort.Ints(lines)
+	return LineSet{lines: lines}
+}
+
 // Contains returns true if the given line number is in the set.
 func (ls LineSet) Contains(line int) bool {
 	i := sort.SearchInts(ls.lines, line)

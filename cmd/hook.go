@@ -12,7 +12,7 @@ import (
 // RunHook dispatches hook subcommands.
 func RunHook(args []string) {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "Usage: git-blamebot hook <prompt-submit|post-tool-use|commit-msg|post-commit|pre-push>")
+		fmt.Fprintln(os.Stderr, "Usage: git-blamebot hook <prompt-submit|pre-tool-use|post-tool-use|commit-msg|post-commit|pre-push>")
 		os.Exit(1)
 	}
 
@@ -20,6 +20,8 @@ func RunHook(args []string) {
 	switch args[0] {
 	case "prompt-submit":
 		err = hook.HandlePromptSubmit(os.Stdin)
+	case "pre-tool-use":
+		err = hook.HandlePreToolUse(os.Stdin)
 	case "post-tool-use":
 		err = hook.HandlePostToolUse(os.Stdin)
 	case "commit-msg":

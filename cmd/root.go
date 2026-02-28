@@ -30,6 +30,7 @@ func RunQuery(args []string) {
 	uninit := fs.Bool("uninit", false, "Remove blamebot tracking from this repo")
 	verbose := fs.Bool("v", false, "Show hashes, sessions, traces, git blame")
 	jsonOutput := fs.Bool("json", false, "Output results as JSON")
+	includeHistory := fs.Bool("include-history", false, "Show superseded/overwritten edits too")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `blamebot: understand why AI-authored code exists.
@@ -44,6 +45,7 @@ Usage:
     git-blamebot --trace <id>              # show reasoning from transcript
     git-blamebot --explain <file|id> [-L N] # deep explanation using Sonnet
     git-blamebot --stats                   # summary statistics
+    git-blamebot --include-history          # include superseded edits
     git-blamebot --json                    # machine-readable JSON output
     git-blamebot --rebuild                 # force index rebuild
     git-blamebot --log [--hook]            # show debug logs
@@ -121,7 +123,7 @@ Subcommands:
 		}
 		cmdExplain(db, file, root, *line)
 	case file != "":
-		cmdFile(db, file, root, *line, *verbose, *jsonOutput)
+		cmdFile(db, file, root, *line, *verbose, *jsonOutput, *includeHistory)
 	default:
 		fs.Usage()
 	}
@@ -161,7 +163,7 @@ func reorderArgs(args []string) []string {
 				switch a {
 				case "--stats", "--rebuild", "--log", "--hook", "--dump-payload",
 					"--fill-reasons", "--dry-run", "--uninit", "-v", "--json",
-					"--explain":
+					"--explain", "--include-history":
 					// no value
 				default:
 					i++

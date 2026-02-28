@@ -5,10 +5,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jensroland/git-blamebot/internal/checkpoint"
 	"github.com/jensroland/git-blamebot/internal/debug"
 	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
@@ -123,6 +125,23 @@ func HandlePostToolUse(r io.Reader) error {
 				fmt.Sprintf("Failed to write pending edit: %v", err), nil)
 			continue
 		}
+
+		// Write post-edit checkpoint
+		absFile := filepath.Join(root, edit.File)
+		if content, err := os.ReadFile(absFile); err == nil {
+			contentSHA, err := checkpoint.WriteBlob(paths.CheckpointDir, string(content))
+			if err == nil {
+				checkpoint.WriteCheckpoint(paths.CheckpointDir, checkpoint.Checkpoint{
+					Kind:       "post-edit",
+					File:       edit.File,
+					ContentSHA: contentSHA,
+					EditID:     pe.ID,
+					ToolUseID:  toolUseID,
+					Ts:         pe.Ts,
+				})
+			}
+		}
+
 		recordsWritten++
 	}
 

@@ -14,11 +14,17 @@ const (
 
 // Manifest represents a bundle of edits associated with a single code commit.
 type Manifest struct {
-	ID        string         `json:"id"`
-	CommitSHA string         `json:"commit_sha,omitempty"`
-	Author    string         `json:"author"`
-	Timestamp string         `json:"timestamp"`
-	Edits     []ManifestEdit `json:"edits"`
+	ID           string                      `json:"id"`
+	CommitSHA    string                      `json:"commit_sha,omitempty"`
+	Author       string                      `json:"author"`
+	Timestamp    string                      `json:"timestamp"`
+	Edits        []ManifestEdit              `json:"edits"`
+	Attributions map[string]FileAttribution  `json:"attributions,omitempty"`
+}
+
+// FileAttribution maps manifest edit indices to their line ranges at commit time.
+type FileAttribution struct {
+	EditLines map[int]lineset.LineSet `json:"edit_lines"`
 }
 
 // ManifestEdit is a single edit record within a manifest.

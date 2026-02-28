@@ -8,7 +8,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jensroland/git-blamebot/internal/checkpoint"
 	"github.com/jensroland/git-blamebot/internal/debug"
+	"github.com/jensroland/git-blamebot/internal/git"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/llm"
 	"github.com/jensroland/git-blamebot/internal/project"
 	"github.com/jensroland/git-blamebot/internal/provenance"
@@ -66,31 +69,35 @@ func HandleCommitMsg(commitMsgFile string) error {
 	// 3. Fill reasons via Haiku
 	fillManifestReasons(&manifest, paths)
 
-	// 4. Extract and write traces
+	// 4. Compute checkpoint-based attribution
+	manifest.Attributions = computeAttributions(root, paths, pending)
+
+	// 5. Extract and write traces
 	writeManifestTraces(root, paths.GitDir, &manifest)
 
-	// 5. Ensure provenance branch exists
+	// 6. Ensure provenance branch exists
 	if err := provenance.InitBranch(root); err != nil {
 		debug.Log(paths.CacheDir, "hook.log",
 			fmt.Sprintf("Failed to init provenance branch: %v", err), nil)
 		return nil
 	}
 
-	// 6. Write manifest to provenance branch
+	// 7. Write manifest to provenance branch
 	if err := provenance.WriteManifest(root, paths.GitDir, manifest); err != nil {
 		debug.Log(paths.CacheDir, "hook.log",
 			fmt.Sprintf("Failed to write manifest: %v", err), nil)
 		return nil
 	}
 
-	// 7. Append trailer to commit message
+	// 8. Append trailer to commit message
 	if err := appendTrailer(commitMsgFile, manifestID); err != nil {
 		debug.Log(paths.CacheDir, "hook.log",
 			fmt.Sprintf("Failed to append trailer: %v", err), nil)
 	}
 
-	// 8. Clear pending edits
+	// 9. Clear pending edits and checkpoints
 	provenance.ClearPending(paths.GitDir)
+	checkpoint.ClearAll(paths.CheckpointDir)
 
 	debug.Log(paths.CacheDir, "hook.log",
 		fmt.Sprintf("Created manifest %s with %d edits", manifestID, len(pending)), nil)
@@ -217,6 +224,78 @@ func buildManifestFillPrompt(sessionPrompts []string, edits []manifestFillEdit) 
 	parts = append(parts, "", `Respond with ONLY a JSON array: [{"id": 1, "reason": "..."}, ...]`)
 	return strings.Join(parts, "\n")
 }
+
+// computeAttributions builds per-file attribution maps from checkpoints.
+func computeAttributions(root string, paths project.Paths, pending []provenance.PendingEdit) map[string]provenance.FileAttribution {
+	allCheckpoints, err := checkpoint.ReadAllCheckpoints(paths.CheckpointDir)
+	if err != nil || len(allCheckpoints) == 0 {
+		return nil
+	}
+
+	// Build pending edit ID → manifest edit index mapping
+	editIDToIdx := make(map[string]int)
+	for i, pe := range pending {
+		editIDToIdx[pe.ID] = i
+	}
+
+	// Find unique files that have checkpoints
+	filesSeen := make(map[string]bool)
+	var files []string
+	for _, cp := range allCheckpoints {
+		if !filesSeen[cp.File] {
+			filesSeen[cp.File] = true
+			files = append(files, cp.File)
+		}
+	}
+
+	result := make(map[string]provenance.FileAttribution)
+
+	blobReader := func(sha string) string {
+		content, _ := checkpoint.ReadBlob(paths.CheckpointDir, sha)
+		return content
+	}
+
+	for _, file := range files {
+		fileCheckpoints := checkpoint.CheckpointsForFile(allCheckpoints, file)
+		if len(fileCheckpoints) == 0 {
+			continue
+		}
+
+		// Get base content (HEAD version)
+		baseContent, _ := git.ShowFile(root, "HEAD", file)
+
+		// Get current content (the staged version being committed)
+		absFile := filepath.Join(root, file)
+		currentBytes, err := os.ReadFile(absFile)
+		if err != nil {
+			continue
+		}
+		currentContent := string(currentBytes)
+
+		// Compute attribution
+		attr := checkpoint.ComputeFileAttribution(baseContent, currentContent, fileCheckpoints, blobReader)
+		if len(attr) == 0 {
+			continue
+		}
+
+		// Convert edit IDs to manifest edit indices
+		editLines := make(map[int]lineset.LineSet)
+		for editID, lineSet := range attr {
+			if idx, ok := editIDToIdx[editID]; ok {
+				editLines[idx] = lineSet
+			}
+		}
+		if len(editLines) > 0 {
+			result[file] = provenance.FileAttribution{EditLines: editLines}
+		}
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
 
 // writeManifestTraces extracts trace contexts from transcripts and writes to provenance branch.
 func writeManifestTraces(root, gitDir string, manifest *provenance.Manifest) {

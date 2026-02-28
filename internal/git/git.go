@@ -64,6 +64,18 @@ func BlameForLine(projectRoot, filePath string, line int) (*BlameInfo, error) {
 	return info, nil
 }
 
+// ShowFile retrieves file content at a given ref (e.g., "HEAD").
+// Returns empty string and error for new files or other errors.
+func ShowFile(root, ref, file string) (string, error) {
+	cmd := exec.Command("git", "show", ref+":"+file)
+	cmd.Dir = root
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
+}
+
 // StageFile runs git add for a file.
 func StageFile(projectRoot, relPath string) error {
 	cmd := exec.Command("git", "add", relPath)

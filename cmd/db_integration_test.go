@@ -286,7 +286,7 @@ func TestCmdFile_Found(t *testing.T) {
 	defer db.Close()
 
 	out := captureStdout(t, func() {
-		cmdFile(db, "src/main.go", root, "", false, false)
+		cmdFile(db, "src/main.go", root, "", false, false, true)
 	})
 
 	if !strings.Contains(out, "src/main.go") {
@@ -299,7 +299,7 @@ func TestCmdFile_NotFound(t *testing.T) {
 	defer db.Close()
 
 	out := captureStdout(t, func() {
-		cmdFile(db, "nonexistent.go", root, "", false, false)
+		cmdFile(db, "nonexistent.go", root, "", false, false, true)
 	})
 
 	if !strings.Contains(out, "No reasons found for") {
@@ -312,7 +312,7 @@ func TestCmdFile_JSON(t *testing.T) {
 	defer db.Close()
 
 	out := captureStdout(t, func() {
-		cmdFile(db, "src/main.go", root, "", false, true)
+		cmdFile(db, "src/main.go", root, "", false, true, true)
 	})
 
 	var result []interface{}

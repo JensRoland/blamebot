@@ -11,11 +11,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jensroland/git-blamebot/internal/checkpoint"
 	"github.com/jensroland/git-blamebot/internal/format"
 	"github.com/jensroland/git-blamebot/internal/git"
 	"github.com/jensroland/git-blamebot/internal/index"
 	"github.com/jensroland/git-blamebot/internal/linemap"
 	"github.com/jensroland/git-blamebot/internal/lineset"
+	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
 	"github.com/jensroland/git-blamebot/internal/record"
 )
 
@@ -30,7 +33,7 @@ func relativePath(filePath, projectRoot string) string {
 	return filePath
 }
 
-func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput bool) {
+func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput, includeHistory bool) {
 	rel := relativePath(filePath, projectRoot)
 
 	if line != "" {
@@ -72,12 +75,27 @@ func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput
 
 	adjMap := blameAdjustFile(projectRoot, rel, rows)
 
-	if jsonOutput {
-		printAdjustedJSON(rows, adjMap, projectRoot)
+	// Filter to only current (non-superseded) edits unless --include-history
+	displayRows := rows
+	if !includeHistory {
+		displayRows = filterCurrentEdits(rows, adjMap)
+	}
+
+	if len(displayRows) == 0 {
+		if jsonOutput {
+			fmt.Println("[]")
+		} else {
+			fmt.Printf("No current AI edits found for %s\n", rel)
+		}
 		return
 	}
 
-	for _, row := range rows {
+	if jsonOutput {
+		printAdjustedJSON(displayRows, adjMap, projectRoot)
+		return
+	}
+
+	for _, row := range displayRows {
 		fmt.Println(format.FormatReason(row, projectRoot, verbose, adjMap[row]))
 		fmt.Println()
 	}
@@ -142,6 +160,10 @@ func queryLineBlame(db *sql.DB, rel, projectRoot, line string) ([]*index.ReasonR
 					continue
 				}
 				currentLines := constrainBySimulation(sim, shaLines)
+				currentLines = correctByContentHash(projectRoot, row, currentLines)
+				if currentLines.IsEmpty() {
+					continue // content verified gone
+				}
 				adjMap[row] = &format.LineAdjustment{CurrentLines: currentLines}
 				if currentLines.Overlaps(queryStart, queryEnd) {
 					matches = append(matches, row)
@@ -179,15 +201,36 @@ func queryLineBlame(db *sql.DB, rel, projectRoot, line string) ([]*index.ReasonR
 				continue
 			}
 			if !sim.CurrentLines.IsEmpty() {
-				currentLines := sim.CurrentLines
-				if row.CommitSHA == "" {
-					currentLines = correctByContentHash(projectRoot, row, currentLines)
+				currentLines := correctByContentHash(projectRoot, row, sim.CurrentLines)
+				if currentLines.IsEmpty() {
+					continue // content verified gone
 				}
 				if currentLines.Overlaps(queryStart, queryEnd) {
 					adjMap[row] = &format.LineAdjustment{CurrentLines: currentLines}
 					matches = append(matches, row)
 				}
 			}
+		}
+	}
+
+	// Override with attribution-based results where available
+	var attrBlame map[int]git.BlameEntry
+	if blameErr == nil {
+		attrBlame = blameEntries
+	}
+	for row, adj := range resolveWithAttribution(projectRoot, rel, allRows, attrBlame) {
+		adjMap[row] = adj
+	}
+
+	// Rebuild matches based on final adjustments
+	matches = nil
+	for _, row := range allRows {
+		adj, ok := adjMap[row]
+		if !ok || adj.Superseded {
+			continue
+		}
+		if !adj.CurrentLines.IsEmpty() && adj.CurrentLines.Overlaps(queryStart, queryEnd) {
+			matches = append(matches, row)
 		}
 	}
 
@@ -219,7 +262,7 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 		for row, sim := range simMap {
 			currentLines := sim.CurrentLines
 			superseded := sim.Superseded
-			if row.CommitSHA == "" && !superseded && !currentLines.IsEmpty() {
+			if !superseded && !currentLines.IsEmpty() {
 				currentLines = correctByContentHash(projectRoot, row, currentLines)
 				if currentLines.IsEmpty() {
 					superseded = true
@@ -229,6 +272,10 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 				CurrentLines: currentLines,
 				Superseded:   superseded,
 			}
+		}
+		// Override with attribution results (pending checkpoints, no blame needed)
+		for row, adj := range resolveWithAttribution(projectRoot, rel, rows, nil) {
+			adjMap[row] = adj
 		}
 		return adjMap
 	}
@@ -271,9 +318,18 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 
 		// Intersect forward-simulated positions with blame lines to exclude
 		// non-AI changes (e.g., manual edits) in the same commit
+		constrained := constrainBySimulation(sim, lineset.New(blameLines...))
+		corrected := correctByContentHash(projectRoot, row, constrained)
+		superseded := corrected.IsEmpty() && !constrained.IsEmpty()
 		adjMap[row] = &format.LineAdjustment{
-			CurrentLines: constrainBySimulation(sim, lineset.New(blameLines...)),
+			CurrentLines: corrected,
+			Superseded:   superseded,
 		}
+	}
+
+	// Override with attribution-based results where available
+	for row, adj := range resolveWithAttribution(projectRoot, rel, rows, blameEntries) {
+		adjMap[row] = adj
 	}
 
 	return adjMap
@@ -576,6 +632,29 @@ func computeAdjustments(_ *sql.DB, rows []*index.ReasonRow, projectRoot string) 
 	return adjMap
 }
 
+// filterCurrentEdits returns only rows that still have lines in the current file.
+// Superseded edits (overwritten, deleted) and edits with no resolved current
+// lines are excluded.
+func filterCurrentEdits(rows []*index.ReasonRow, adjMap map[*index.ReasonRow]*format.LineAdjustment) []*index.ReasonRow {
+	var filtered []*index.ReasonRow
+	for _, row := range rows {
+		adj := adjMap[row]
+		if adj == nil {
+			// No adjustment info — include as a safe default
+			filtered = append(filtered, row)
+			continue
+		}
+		if adj.Superseded {
+			continue
+		}
+		if adj.CurrentLines.IsEmpty() {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	return filtered
+}
+
 // sortNewestFirst sorts rows by timestamp descending.
 func sortNewestFirst(rows []*index.ReasonRow) {
 	for i, j := 0, len(rows)-1; i < j; i, j = i+1, j-1 {
@@ -620,4 +699,166 @@ func printAdjustedJSON(rows []*index.ReasonRow, adjMap map[*index.ReasonRow]*for
 	}
 	b, _ := json.MarshalIndent(items, "", "  ")
 	fmt.Println(string(b))
+}
+
+// resolveWithAttribution attempts to resolve line positions using checkpoint-based
+// attribution data. Returns adjustments for rows it can resolve. Rows not in
+// the returned map should use the existing fallback path.
+func resolveWithAttribution(projectRoot, file string, rows []*index.ReasonRow, blameEntries map[int]git.BlameEntry) map[*index.ReasonRow]*format.LineAdjustment {
+	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
+	paths := project.NewPaths(projectRoot)
+
+	// 1. Resolve pending edits using checkpoint chain
+	resolvePendingWithCheckpoints(projectRoot, file, rows, paths, adjMap)
+
+	// 2. Resolve committed edits using manifest attributions
+	if blameEntries != nil {
+		resolveCommittedWithAttribution(projectRoot, file, rows, blameEntries, adjMap)
+	}
+
+	return adjMap
+}
+
+// resolvePendingWithCheckpoints uses the checkpoint chain to compute exact
+// line positions for pending (uncommitted) edits.
+func resolvePendingWithCheckpoints(projectRoot, file string, rows []*index.ReasonRow, paths project.Paths, adjMap map[*index.ReasonRow]*format.LineAdjustment) {
+	// Check for pending rows
+	hasPending := false
+	for _, row := range rows {
+		if row.CommitSHA == "" && row.File == file {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		return
+	}
+
+	// Read checkpoints for this file
+	allCheckpoints, err := checkpoint.ReadAllCheckpoints(paths.CheckpointDir)
+	if err != nil || len(allCheckpoints) == 0 {
+		return
+	}
+	fileCheckpoints := checkpoint.CheckpointsForFile(allCheckpoints, file)
+	if len(fileCheckpoints) == 0 {
+		return
+	}
+
+	// Read pending edits to get editID → contentHash mapping
+	pendingEdits, err := provenance.ReadAllPending(paths.GitDir)
+	if err != nil {
+		return
+	}
+	editIDToHash := make(map[string]string)
+	for _, pe := range pendingEdits {
+		if pe.File == file {
+			editIDToHash[pe.ID] = pe.ContentHash
+		}
+	}
+
+	// Get base content (HEAD version)
+	baseContent, _ := git.ShowFile(projectRoot, "HEAD", file)
+
+	// Get current content (working tree)
+	absFile := filepath.Join(projectRoot, file)
+	currentBytes, err := os.ReadFile(absFile)
+	if err != nil {
+		return
+	}
+	currentContent := string(currentBytes)
+
+	blobReader := func(sha string) string {
+		content, _ := checkpoint.ReadBlob(paths.CheckpointDir, sha)
+		return content
+	}
+
+	// Compute attribution
+	attr := checkpoint.ComputeFileAttribution(baseContent, currentContent, fileCheckpoints, blobReader)
+
+	// Build contentHash → LineSet map
+	hashToLines := make(map[string]lineset.LineSet)
+	for editID, lineSet := range attr {
+		if hash, ok := editIDToHash[editID]; ok {
+			hashToLines[hash] = lineSet
+		}
+	}
+
+	// Match rows to attribution results by content hash
+	for _, row := range rows {
+		if row.CommitSHA != "" || row.File != file {
+			continue
+		}
+		if lineSet, ok := hashToLines[row.ContentHash]; ok {
+			if lineSet.IsEmpty() {
+				adjMap[row] = &format.LineAdjustment{Superseded: true}
+			} else {
+				adjMap[row] = &format.LineAdjustment{CurrentLines: lineSet}
+			}
+		}
+	}
+}
+
+// resolveCommittedWithAttribution uses manifest attribution data and git blame
+// to compute exact current line positions for committed edits.
+func resolveCommittedWithAttribution(projectRoot, file string, rows []*index.ReasonRow, blameEntries map[int]git.BlameEntry, adjMap map[*index.ReasonRow]*format.LineAdjustment) {
+	// Group rows by manifest ID (SourceFile)
+	rowsByManifest := make(map[string][]*index.ReasonRow)
+	for _, row := range rows {
+		if row.CommitSHA != "" && row.SourceFile != "" && row.SourceFile != "pending" && row.File == file {
+			rowsByManifest[row.SourceFile] = append(rowsByManifest[row.SourceFile], row)
+		}
+	}
+
+	for manifestID, mRows := range rowsByManifest {
+		m, err := provenance.ReadManifest(projectRoot, manifestID)
+		if err != nil || m == nil || m.Attributions == nil {
+			continue
+		}
+		fileAttr, ok := m.Attributions[file]
+		if !ok || len(fileAttr.EditLines) == 0 {
+			continue
+		}
+
+		// Build origLine → editIndex map for this commit
+		origToEdit := make(map[int]int)
+		for editIdx, lineSet := range fileAttr.EditLines {
+			for _, line := range lineSet.Lines() {
+				origToEdit[line] = editIdx
+			}
+		}
+
+		// Map attribution orig lines to current lines via blame
+		editCurrentLines := make(map[int][]int)
+		for currentLine, entry := range blameEntries {
+			if entry.SHA != m.CommitSHA {
+				continue
+			}
+			if editIdx, ok := origToEdit[entry.OrigLine]; ok {
+				editCurrentLines[editIdx] = append(editCurrentLines[editIdx], currentLine)
+			}
+		}
+
+		// Build editIndex → contentHash map for matching rows
+		editToHash := make(map[int]string)
+		for i, edit := range m.Edits {
+			if edit.File == file {
+				editToHash[i] = edit.ContentHash
+			}
+		}
+
+		// Match rows to edits by content hash
+		for _, row := range mRows {
+			for editIdx, hash := range editToHash {
+				if hash == row.ContentHash {
+					if currentLines, ok := editCurrentLines[editIdx]; ok && len(currentLines) > 0 {
+						adjMap[row] = &format.LineAdjustment{CurrentLines: lineset.New(currentLines...)}
+					} else {
+						adjMap[row] = &format.LineAdjustment{Superseded: true}
+					}
+					delete(editToHash, editIdx) // prevent duplicate matching
+					break
+				}
+			}
+		}
+	}
 }

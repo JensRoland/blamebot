@@ -55,6 +55,15 @@ func enableGlobal() {
 
 	hookCmd := binaryPath + " hook post-tool-use"
 	captureCmd := binaryPath + " hook prompt-submit"
+	preToolCmd := binaryPath + " hook pre-tool-use"
+
+	// PreToolUse — replace blamebot entries
+	preTool := filterHookEntries(hooks, "PreToolUse", "git-blamebot")
+	preTool = append(preTool, map[string]interface{}{
+		"matcher": "Edit|Write|MultiEdit",
+		"hooks":   []interface{}{map[string]interface{}{"type": "command", "command": preToolCmd}},
+	})
+	hooks["PreToolUse"] = preTool
 
 	// PostToolUse — replace blamebot entries
 	postTool := filterHookEntries(hooks, "PostToolUse", "git-blamebot")

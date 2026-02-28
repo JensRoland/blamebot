@@ -3,12 +3,14 @@ package cmd
 import (
 	"flag"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jensroland/git-blamebot/internal/checkpoint"
 	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
 	"github.com/jensroland/git-blamebot/internal/provenance"
@@ -119,10 +121,14 @@ func debugInsert(root, absFile, relFile string, line, count int, asAgent bool) {
 		os.Exit(1)
 	}
 
-	// Generate new lines
+	// Generate new lines (random suffix ensures unique content hashes)
+	suffix := ""
+	if asAgent {
+		suffix = "-as-agent"
+	}
 	var newContent []string
 	for i := 0; i < count; i++ {
-		newContent = append(newContent, fmt.Sprintf("debug-insert-L%d", line+i))
+		newContent = append(newContent, fmt.Sprintf("debug-insert-L%d-%d%s", line+i, rand.Intn(100000), suffix))
 	}
 
 	// Splice in
@@ -146,7 +152,12 @@ func debugInsert(root, absFile, relFile string, line, count int, asAgent bool) {
 			NewLines: count,
 		}
 		newLines := lineset.FromRange(line, line+count-1)
-		registerAsAgent(root, relFile, "insert", hunk, newLines, strings.Join(newContent, "\n"))
+		preContent := strings.Join(lines, "\n") + "\n"
+		if len(lines) == 0 {
+			preContent = ""
+		}
+		postContent := strings.Join(result, "\n") + "\n"
+		registerAsAgent(root, relFile, "insert", hunk, newLines, strings.Join(newContent, "\n"), preContent, postContent)
 	}
 }
 
@@ -163,11 +174,18 @@ func debugReplace(root, absFile, relFile string, line, count int, asAgent bool) 
 		os.Exit(1)
 	}
 
-	// Generate replacement lines
+	// Generate replacement lines (random suffix ensures unique content hashes)
+	suffix := ""
+	if asAgent {
+		suffix = "-as-agent"
+	}
 	var newContent []string
 	for i := 0; i < count; i++ {
-		newContent = append(newContent, fmt.Sprintf("debug-replace-L%d", line+i))
+		newContent = append(newContent, fmt.Sprintf("debug-replace-L%d-%d%s", line+i, rand.Intn(100000), suffix))
 	}
+
+	// Capture pre-edit content before replacing
+	preContent := strings.Join(lines, "\n") + "\n"
 
 	// Replace in-place
 	for i := 0; i < count; i++ {
@@ -189,7 +207,8 @@ func debugReplace(root, absFile, relFile string, line, count int, asAgent bool) 
 			NewLines: count,
 		}
 		newLines := lineset.FromRange(line, line+count-1)
-		registerAsAgent(root, relFile, "replace", hunk, newLines, strings.Join(newContent, "\n"))
+		postContent := strings.Join(lines, "\n") + "\n"
+		registerAsAgent(root, relFile, "replace", hunk, newLines, strings.Join(newContent, "\n"), preContent, postContent)
 	}
 }
 
@@ -225,12 +244,17 @@ func debugRemove(root, absFile, relFile string, line, count int, asAgent bool) {
 			NewStart: line,
 			NewLines: 0,
 		}
+		preContent := strings.Join(lines, "\n") + "\n"
+		postContent := strings.Join(result, "\n") + "\n"
+		if len(result) == 0 {
+			postContent = ""
+		}
 		// No new lines for a removal — empty line set
-		registerAsAgent(root, relFile, "remove", hunk, lineset.LineSet{}, "")
+		registerAsAgent(root, relFile, "remove", hunk, lineset.LineSet{}, "", preContent, postContent)
 	}
 }
 
-func registerAsAgent(root, relFile, op string, hunk record.HunkInfo, newLines lineset.LineSet, newContent string) {
+func registerAsAgent(root, relFile, op string, hunk record.HunkInfo, newLines lineset.LineSet, newContent string, preEditContent string, postEditContent string) {
 	if !project.IsInitialized(root) {
 		fmt.Fprintln(os.Stderr, "Warning: --as-agent ignored, blamebot not initialized (run 'git-blamebot enable')")
 		return
@@ -258,6 +282,42 @@ func registerAsAgent(root, relFile, op string, hunk record.HunkInfo, newLines li
 
 	if err := provenance.WritePending(paths.GitDir, pe); err != nil {
 		fmt.Fprintf(os.Stderr, "Error writing pending edit: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Write pre-edit and post-edit checkpoints for attribution tracking
+	toolUseID := "debug-" + pe.ID[:8]
+
+	preSHA, err := checkpoint.WriteBlob(paths.CheckpointDir, preEditContent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing pre-edit blob: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := checkpoint.WriteCheckpoint(paths.CheckpointDir, checkpoint.Checkpoint{
+		Kind:       "pre-edit",
+		File:       relFile,
+		ContentSHA: preSHA,
+		ToolUseID:  toolUseID,
+		Ts:         pe.Ts,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing pre-edit checkpoint: %v\n", err)
+		os.Exit(1)
+	}
+
+	postSHA, err := checkpoint.WriteBlob(paths.CheckpointDir, postEditContent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing post-edit blob: %v\n", err)
+		os.Exit(1)
+	}
+	if _, err := checkpoint.WriteCheckpoint(paths.CheckpointDir, checkpoint.Checkpoint{
+		Kind:       "post-edit",
+		File:       relFile,
+		ContentSHA: postSHA,
+		EditID:     pe.ID,
+		ToolUseID:  toolUseID,
+		Ts:         pe.Ts,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "Error writing post-edit checkpoint: %v\n", err)
 		os.Exit(1)
 	}
 

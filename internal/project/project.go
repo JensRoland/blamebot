@@ -10,11 +10,12 @@ import (
 
 // Paths holds all relevant directories for a blamebot-enabled repo.
 type Paths struct {
-	Root       string // git repo root
-	GitDir     string // actual .git directory (resolved for worktrees)
-	PendingDir string // <gitdir>/blamebot/pending/
-	CacheDir   string // <gitdir>/blamebot/
-	IndexDB    string // <gitdir>/blamebot/index.db
+	Root          string // git repo root
+	GitDir        string // actual .git directory (resolved for worktrees)
+	PendingDir    string // <gitdir>/blamebot/pending/
+	CheckpointDir string // <gitdir>/blamebot/checkpoints/
+	CacheDir      string // <gitdir>/blamebot/
+	IndexDB       string // <gitdir>/blamebot/index.db
 }
 
 // FindRoot returns the git project root, preferring CLAUDE_PROJECT_DIR if set.
@@ -34,11 +35,12 @@ func NewPaths(root string) Paths {
 	gitDir := resolveGitDir(root)
 	cacheDir := filepath.Join(gitDir, "blamebot")
 	return Paths{
-		Root:       root,
-		GitDir:     gitDir,
-		PendingDir: filepath.Join(cacheDir, "pending"),
-		CacheDir:   cacheDir,
-		IndexDB:    filepath.Join(cacheDir, "index.db"),
+		Root:          root,
+		GitDir:        gitDir,
+		PendingDir:    filepath.Join(cacheDir, "pending"),
+		CheckpointDir: filepath.Join(cacheDir, "checkpoints"),
+		CacheDir:      cacheDir,
+		IndexDB:       filepath.Join(cacheDir, "index.db"),
 	}
 }
 

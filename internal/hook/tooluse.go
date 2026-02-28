@@ -131,7 +131,7 @@ func HandlePostToolUse(r io.Reader) error {
 		if content, err := os.ReadFile(absFile); err == nil {
 			contentSHA, err := checkpoint.WriteBlob(paths.CheckpointDir, string(content))
 			if err == nil {
-				checkpoint.WriteCheckpoint(paths.CheckpointDir, checkpoint.Checkpoint{
+				_, _ = checkpoint.WriteCheckpoint(paths.CheckpointDir, checkpoint.Checkpoint{
 					Kind:       "post-edit",
 					File:       edit.File,
 					ContentSHA: contentSHA,

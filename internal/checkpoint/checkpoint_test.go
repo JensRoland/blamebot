@@ -45,9 +45,9 @@ func TestWriteAndReadCheckpoint(t *testing.T) {
 func TestReadAllCheckpoints_SortedByTimestamp(t *testing.T) {
 	dir := t.TempDir()
 
-	WriteCheckpoint(dir, Checkpoint{Kind: "post-edit", Ts: "2024-01-03T00:00:00Z", File: "a.go"})
-	WriteCheckpoint(dir, Checkpoint{Kind: "pre-edit", Ts: "2024-01-01T00:00:00Z", File: "a.go"})
-	WriteCheckpoint(dir, Checkpoint{Kind: "post-edit", Ts: "2024-01-02T00:00:00Z", File: "a.go"})
+	_, _ = WriteCheckpoint(dir, Checkpoint{Kind: "post-edit", Ts: "2024-01-03T00:00:00Z", File: "a.go"})
+	_, _ = WriteCheckpoint(dir, Checkpoint{Kind: "pre-edit", Ts: "2024-01-01T00:00:00Z", File: "a.go"})
+	_, _ = WriteCheckpoint(dir, Checkpoint{Kind: "post-edit", Ts: "2024-01-02T00:00:00Z", File: "a.go"})
 
 	all, err := ReadAllCheckpoints(dir)
 	if err != nil {
@@ -148,8 +148,8 @@ func TestCheckpointsForFile(t *testing.T) {
 func TestClearAll(t *testing.T) {
 	dir := t.TempDir()
 
-	WriteCheckpoint(dir, Checkpoint{Kind: "pre-edit", Ts: "2024-01-01T00:00:00Z"})
-	WriteBlob(dir, "hello")
+	_, _ = WriteCheckpoint(dir, Checkpoint{Kind: "pre-edit", Ts: "2024-01-01T00:00:00Z"})
+	_, _ = WriteBlob(dir, "hello")
 
 	err := ClearAll(dir)
 	if err != nil {

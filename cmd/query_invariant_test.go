@@ -746,8 +746,8 @@ func TestContentHash_Sequences(t *testing.T) {
 		runGitCmd(t, root, "commit", "-m", "mixed commit")
 		sha := gitHeadSHA(t, root)
 
-		provenance.ClearPending(paths.GitDir)
-		os.Remove(paths.IndexDB)
+		_ = provenance.ClearPending(paths.GitDir)
+		_ = os.Remove(paths.IndexDB)
 		committedReplace(t, root, paths.GitDir, "m1", sha, "f.go", 3, ai, "2025-01-01T00:01:00Z")
 
 		db2 := rebuildTestIndex(t, paths)

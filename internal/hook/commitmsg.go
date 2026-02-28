@@ -96,8 +96,8 @@ func HandleCommitMsg(commitMsgFile string) error {
 	}
 
 	// 9. Clear pending edits and checkpoints
-	provenance.ClearPending(paths.GitDir)
-	checkpoint.ClearAll(paths.CheckpointDir)
+	_ = provenance.ClearPending(paths.GitDir)
+	_ = checkpoint.ClearAll(paths.CheckpointDir)
 
 	debug.Log(paths.CacheDir, "hook.log",
 		fmt.Sprintf("Created manifest %s with %d edits", manifestID, len(pending)), nil)

@@ -15,7 +15,7 @@ func TestRebuild_IncludesPendingEdits(t *testing.T) {
 	defer cleanup()
 
 	ls, _ := lineset.FromString("3-5")
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:     "pending-1",
 		Ts:     "2025-01-01T00:01:00Z",
 		File:   "README.md",
@@ -93,7 +93,7 @@ func TestRebuild_PendingEditsWithManifests(t *testing.T) {
 	})
 
 	ls2, _ := lineset.FromString("3-5")
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:     "pending-1",
 		Ts:     "2025-01-01T00:01:00Z",
 		File:   "README.md",
@@ -146,7 +146,7 @@ func TestStaleness_PendingCountChange(t *testing.T) {
 
 	// Add a pending edit
 	ls, _ := lineset.FromString("5")
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:    "pending-1",
 		Ts:    "2025-01-01T00:00:00Z",
 		File:  "main.go",
@@ -170,7 +170,7 @@ func TestStaleness_PendingCountChange(t *testing.T) {
 	}
 
 	// Remove pending edits
-	provenance.ClearPending(paths.GitDir)
+	_ = provenance.ClearPending(paths.GitDir)
 
 	if !IsStale(paths) {
 		t.Error("index should be stale after clearing pending edits")

@@ -25,7 +25,7 @@ func TestHandlePostToolUse_EndToEnd(t *testing.T) {
 		TranscriptPath: "/transcript/path",
 	}
 	psBytes, _ := json.Marshal(ps)
-	os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644)
 
 	t.Setenv("CLAUDE_PROJECT_DIR", tmpDir)
 
@@ -108,7 +108,7 @@ func TestHandlePostToolUse_WriteCreatesFullRange(t *testing.T) {
 
 	ps := promptState{Author: "test"}
 	psBytes, _ := json.Marshal(ps)
-	os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".git", "blamebot", "current_prompt.json"), psBytes, 0o644)
 
 	t.Setenv("CLAUDE_PROJECT_DIR", tmpDir)
 
@@ -148,7 +148,7 @@ func TestHandlePostToolUse_WriteCreatesFullRange(t *testing.T) {
 func TestHandlePostToolUse_NotInitialized(t *testing.T) {
 	tmpDir := t.TempDir()
 	// Create bare .git but NO provenance branch and no .blamebot/
-	os.MkdirAll(filepath.Join(tmpDir, ".git", "blamebot"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, ".git", "blamebot"), 0o755)
 
 	t.Setenv("CLAUDE_PROJECT_DIR", tmpDir)
 
@@ -171,7 +171,7 @@ func initGitRepo(t *testing.T, dir string) {
 	if err := provenance.InitBranch(dir); err != nil {
 		t.Fatalf("InitBranch: %v", err)
 	}
-	os.MkdirAll(filepath.Join(dir, ".git", "blamebot"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, ".git", "blamebot"), 0o755)
 }
 
 func run(t *testing.T, dir, name string, args ...string) {

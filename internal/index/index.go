@@ -78,11 +78,7 @@ func IsStale(paths project.Paths) bool {
 	currentPending := countPendingFiles(paths.PendingDir)
 	var storedPending int
 	db.QueryRow("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'pending_count'").Scan(&storedPending)
-	if currentPending != storedPending {
-		return true
-	}
-
-	return false
+	return currentPending != storedPending
 }
 
 // Rebuild drops and recreates the SQLite index from provenance branch manifests.
@@ -310,8 +306,8 @@ func storeHeadSHA(db *sql.DB, root string) {
 // storeProvTipSHA saves the provenance branch tip SHA for staleness detection.
 func storeProvTipSHA(db *sql.DB, root string) {
 	sha := provenance.BranchTipSHA(root)
-	db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-	db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('prov_tip_sha', ?)", sha)
+	_, _ = db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+	_, _ = db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('prov_tip_sha', ?)", sha)
 }
 
 // headSHAChanged returns true if HEAD has changed since the last rebuild.
@@ -327,8 +323,8 @@ func headSHAChanged(db *sql.DB, root string) bool {
 
 // storePendingCount saves the number of pending edit files for staleness detection.
 func storePendingCount(db *sql.DB, count int) {
-	db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-	db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pending_count', ?)", count)
+	_, _ = db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+	_, _ = db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pending_count', ?)", count)
 }
 
 // countPendingFiles counts files in the pending edits directory.

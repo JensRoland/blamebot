@@ -61,7 +61,7 @@ func TestBranchTipSHA(t *testing.T) {
 		t.Fatalf("expected empty SHA before init, got %s", sha)
 	}
 
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	sha := BranchTipSHA(root)
 	if sha == "" {
@@ -75,7 +75,7 @@ func TestBranchTipSHA(t *testing.T) {
 func TestWriteAndReadManifest(t *testing.T) {
 	root := initTestRepo(t)
 	gitDir := filepath.Join(root, ".git")
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	m := Manifest{
 		ID:        "test-uuid-1234",
@@ -127,7 +127,7 @@ func TestWriteAndReadManifest(t *testing.T) {
 func TestListAndReadAllManifests(t *testing.T) {
 	root := initTestRepo(t)
 	gitDir := filepath.Join(root, ".git")
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	// Write two manifests
 	for _, id := range []string{"aaa-111", "bbb-222"} {
@@ -164,7 +164,7 @@ func TestListAndReadAllManifests(t *testing.T) {
 func TestUpdateManifestCommitSHA(t *testing.T) {
 	root := initTestRepo(t)
 	gitDir := filepath.Join(root, ".git")
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	m := Manifest{
 		ID:        "update-test",
@@ -172,7 +172,7 @@ func TestUpdateManifestCommitSHA(t *testing.T) {
 		Timestamp: "2026-02-28T12:00:00Z",
 		Edits:     []ManifestEdit{{File: "test.go"}},
 	}
-	WriteManifest(root, gitDir, m)
+	_ = WriteManifest(root, gitDir, m)
 
 	if err := UpdateManifestCommitSHA(root, gitDir, "update-test", "abc123def456"); err != nil {
 		t.Fatalf("UpdateManifestCommitSHA: %v", err)
@@ -187,7 +187,7 @@ func TestUpdateManifestCommitSHA(t *testing.T) {
 func TestWriteAndReadTrace(t *testing.T) {
 	root := initTestRepo(t)
 	gitDir := filepath.Join(root, ".git")
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	contexts := map[string]string{
 		"toolu_123": "thinking about the change...",
@@ -223,7 +223,7 @@ func TestWriteAndReadTrace(t *testing.T) {
 func TestPendingCRUD(t *testing.T) {
 	dir := t.TempDir()
 	gitDir := filepath.Join(dir, ".git")
-	os.MkdirAll(gitDir, 0o755)
+	_ = os.MkdirAll(gitDir, 0o755)
 
 	// Initially empty
 	if HasPending(gitDir) {
@@ -269,10 +269,10 @@ func TestPendingCRUD(t *testing.T) {
 func TestWorkingTreeNotAffected(t *testing.T) {
 	root := initTestRepo(t)
 	gitDir := filepath.Join(root, ".git")
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	// Create a file in the working tree
-	os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello"), 0o644)
+	_ = os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hello"), 0o644)
 
 	// Write a manifest — should NOT affect working tree
 	m := Manifest{
@@ -281,7 +281,7 @@ func TestWorkingTreeNotAffected(t *testing.T) {
 		Timestamp: "2026-02-28T12:00:00Z",
 		Edits:     []ManifestEdit{{File: "test.go"}},
 	}
-	WriteManifest(root, gitDir, m)
+	_ = WriteManifest(root, gitDir, m)
 
 	// Verify hello.txt still exists and is unchanged
 	data, err := os.ReadFile(filepath.Join(root, "hello.txt"))
@@ -309,7 +309,7 @@ func TestWorkingTreeNotAffected(t *testing.T) {
 
 func TestReadBlobNonexistent(t *testing.T) {
 	root := initTestRepo(t)
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	_, err := ReadBlob(root, "manifests/does-not-exist.json")
 	if err == nil {
@@ -319,7 +319,7 @@ func TestReadBlobNonexistent(t *testing.T) {
 
 func TestReadManifestNonexistent(t *testing.T) {
 	root := initTestRepo(t)
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	_, err := ReadManifest(root, "nonexistent")
 	if err == nil {
@@ -329,7 +329,7 @@ func TestReadManifestNonexistent(t *testing.T) {
 
 func TestListManifestsEmptyBranch(t *testing.T) {
 	root := initTestRepo(t)
-	InitBranch(root)
+	_ = InitBranch(root)
 
 	ids, err := ListManifests(root)
 	if err != nil {

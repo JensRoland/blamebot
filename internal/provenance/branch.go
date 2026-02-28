@@ -52,7 +52,7 @@ func InitBranch(root string) error {
 // This does NOT check out the branch or affect the working tree.
 func WriteBlob(root, gitDir, branchPath string, data []byte) error {
 	indexFile := filepath.Join(gitDir, "blamebot-provenance-index")
-	defer os.Remove(indexFile)
+	defer os.Remove(indexFile) //nolint:errcheck
 
 	env := append(os.Environ(), "GIT_INDEX_FILE="+indexFile)
 
@@ -301,7 +301,7 @@ func mergeRemoteBranch(root string) error {
 	// Use read-tree -m to merge the two trees
 	// Since files are UUID-named and never conflict, this is always clean
 	indexFile := filepath.Join(root, ".git", "blamebot-merge-index")
-	defer os.Remove(indexFile)
+	defer os.Remove(indexFile) //nolint:errcheck
 
 	env := append(os.Environ(), "GIT_INDEX_FILE="+indexFile)
 

@@ -509,9 +509,9 @@ func TestQueryAdjustedLineFallback_LineStartFallback(t *testing.T) {
 	_ = matches
 }
 
-// ---------- printJSON tests ----------
+// ---------- printAdjustedJSON tests ----------
 
-func TestPrintJSON(t *testing.T) {
+func TestPrintAdjustedJSON(t *testing.T) {
 	// Create a simple ReasonRow
 	lineStart := 5
 	lineEnd := 10
@@ -533,7 +533,7 @@ func TestPrintJSON(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		printJSON([]*index.ReasonRow{row}, "/tmp/fake-root")
+		printAdjustedJSON([]*index.ReasonRow{row}, nil, "/tmp/fake-root")
 	})
 
 	out = strings.TrimSpace(out)

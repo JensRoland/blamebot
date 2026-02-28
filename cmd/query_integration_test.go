@@ -65,7 +65,7 @@ func writeTestFileAt(t *testing.T, dir, name, content string) {
 
 func makeTestPaths(root string) project.Paths {
 	cacheDir := filepath.Join(root, ".git", "blamebot")
-	os.MkdirAll(cacheDir, 0o755)
+	_ = os.MkdirAll(cacheDir, 0o755)
 	return project.Paths{
 		Root:       root,
 		GitDir:     filepath.Join(root, ".git"),
@@ -139,7 +139,7 @@ func TestQueryLineBlame_PendingEditVisible(t *testing.T) {
 
 	// 3. Create pending edit recording AI's change
 	ls, _ := lineset.FromString("3-5")
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:     "pending-1",
 		Ts:     "2025-01-01T00:01:00Z",
 		File:   "README.md",
@@ -198,7 +198,7 @@ func TestBlameAdjustFile_PendingEditVisible(t *testing.T) {
 
 	// 2. Write a manifest for an earlier committed AI edit (lines 1-2)
 	ls1, _ := lineset.FromString("1-2")
-	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+	_ = provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
 		ID:        "m1",
 		CommitSHA: initialSHA,
 		Author:    "claude",
@@ -219,7 +219,7 @@ func TestBlameAdjustFile_PendingEditVisible(t *testing.T) {
 
 	// 4. Create pending edit
 	ls2, _ := lineset.FromString("3-5")
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:     "pending-1",
 		Ts:     "2025-01-01T00:01:00Z",
 		File:   "README.md",
@@ -285,7 +285,7 @@ func TestBlameAdjustFile_SeparatesAIAndManual(t *testing.T) {
 
 	// 3. Write manifest recording ONLY the AI edit (lines 3-5)
 	ls, _ := lineset.FromString("3-5")
-	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+	_ = provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
 		ID:        "m1",
 		CommitSHA: commitSHA,
 		Author:    "claude",
@@ -358,7 +358,7 @@ func TestQueryLineBlame_AILineReturnsMatch(t *testing.T) {
 	commitSHA := gitHeadSHA(t, root)
 
 	ls, _ := lineset.FromString("3-5")
-	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+	_ = provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
 		ID:        "m1",
 		CommitSHA: commitSHA,
 		Author:    "claude",
@@ -411,7 +411,7 @@ func TestQueryLineBlame_ManualLineNoMatch(t *testing.T) {
 	commitSHA := gitHeadSHA(t, root)
 
 	ls, _ := lineset.FromString("3-5")
-	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+	_ = provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
 		ID:        "m1",
 		CommitSHA: commitSHA,
 		Author:    "claude",
@@ -463,7 +463,7 @@ func TestQueryIntegration_FullScenario(t *testing.T) {
 	commit1SHA := gitHeadSHA(t, root)
 
 	ls1, _ := lineset.FromString("1-20")
-	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+	_ = provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
 		ID:        "m1",
 		CommitSHA: commit1SHA,
 		Author:    "claude",
@@ -483,7 +483,7 @@ func TestQueryIntegration_FullScenario(t *testing.T) {
 	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 16))
 
 	ls2, _ := lineset.FromString("3-5")
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:     "pending-1",
 		Ts:     "2025-01-01T00:01:00Z",
 		File:   "README.md",
@@ -532,8 +532,8 @@ func TestQueryIntegration_FullScenario(t *testing.T) {
 	commit2SHA := gitHeadSHA(t, root)
 
 	// Clear pending, create manifest for the committed AI edit only
-	provenance.ClearPending(paths.GitDir)
-	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+	_ = provenance.ClearPending(paths.GitDir)
+	_ = provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
 		ID:        "m2",
 		CommitSHA: commit2SHA,
 		Author:    "claude",
@@ -612,7 +612,7 @@ func TestQueryLineBlame_ManualInsertShiftsPendingEdit(t *testing.T) {
 	// Create pending edit
 	ls, _ := lineset.FromString("3-5")
 	nl := 3
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:          "pending-1",
 		Ts:          "2025-01-01T00:01:00Z",
 		File:        "README.md",
@@ -681,7 +681,7 @@ func TestBlameAdjustFile_ManualInsertCorrectedPositions(t *testing.T) {
 
 	ls, _ := lineset.FromString("3-5")
 	nl := 3
-	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(paths.GitDir, provenance.PendingEdit{
 		ID:          "pending-1",
 		Ts:          "2025-01-01T00:01:00Z",
 		File:        "README.md",

@@ -145,7 +145,7 @@ func pendingReplace(t *testing.T, gitDir, id, file string, start int, ai []strin
 	t.Helper()
 	n := len(ai)
 	ls := lineset.FromRange(start, start+n-1)
-	provenance.WritePending(gitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(gitDir, provenance.PendingEdit{
 		ID: id, Ts: ts, File: file, Lines: ls,
 		Hunk:        &record.HunkInfo{OldStart: start, OldLines: n, NewStart: start, NewLines: n},
 		ContentHash: record.ContentHash(strings.Join(ai, "\n")),
@@ -158,7 +158,7 @@ func pendingInsert(t *testing.T, gitDir, id, file string, start int, ai []string
 	t.Helper()
 	n := len(ai)
 	ls := lineset.FromRange(start, start+n-1)
-	provenance.WritePending(gitDir, provenance.PendingEdit{
+	_ = provenance.WritePending(gitDir, provenance.PendingEdit{
 		ID: id, Ts: ts, File: file, Lines: ls,
 		Hunk:        &record.HunkInfo{OldStart: start, OldLines: 0, NewStart: start, NewLines: n},
 		ContentHash: record.ContentHash(strings.Join(ai, "\n")),
@@ -171,7 +171,7 @@ func committedReplace(t *testing.T, root, gitDir, id, sha, file string, start in
 	t.Helper()
 	n := len(ai)
 	ls := lineset.FromRange(start, start+n-1)
-	provenance.WriteManifest(root, gitDir, provenance.Manifest{
+	_ = provenance.WriteManifest(root, gitDir, provenance.Manifest{
 		ID: id, CommitSHA: sha, Author: "claude", Timestamp: ts,
 		Edits: []provenance.ManifestEdit{{
 			File: file, Lines: ls,

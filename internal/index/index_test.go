@@ -18,7 +18,7 @@ func setupTestPaths(t *testing.T) (project.Paths, func()) {
 	initRepo(t, tmpDir)
 
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
-	os.MkdirAll(cacheDir, 0o755)
+	_ = os.MkdirAll(cacheDir, 0o755)
 
 	paths := project.Paths{
 		Root:       tmpDir,

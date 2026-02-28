@@ -590,3 +590,149 @@ func TestQueryIntegration_FullScenario(t *testing.T) {
 		}
 	}
 }
+
+// ── Content hash correction: manual edits shifting pending AI edits ───────────
+
+// TestQueryLineBlame_ManualInsertShiftsPendingEdit verifies that when manual
+// edits are made above a pending AI edit, the AI edit's reported line numbers
+// are corrected to reflect the actual physical position.
+func TestQueryLineBlame_ManualInsertShiftsPendingEdit(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
+
+	// 1. Create file with 20 lines, commit
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial file")
+
+	// 2. AI replaces lines 3-5 with known content
+	aiContent := "changed 3\nchanged 4\nchanged 5"
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 5))
+
+	// Create pending edit
+	ls, _ := lineset.FromString("3-5")
+	nl := 3
+	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+		ID:          "pending-1",
+		Ts:          "2025-01-01T00:01:00Z",
+		File:        "README.md",
+		Lines:       ls,
+		Hunk:        &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: nl},
+		ContentHash: record.ContentHash(aiContent),
+		Change:      "AI modified lines 3-5",
+		Tool:        "Edit",
+		Author:      "claude",
+	})
+
+	// 3. Manual insert of 3 lines at the top — shifts AI content to lines 6-8
+	var shifted strings.Builder
+	shifted.WriteString("manual 1\nmanual 2\nmanual 3\n")
+	for i := 1; i <= 20; i++ {
+		if i >= 3 && i <= 5 {
+			fmt.Fprintf(&shifted, "changed %d\n", i)
+		} else {
+			fmt.Fprintf(&shifted, "line %d\n", i)
+		}
+	}
+	writeTestFileAt(t, root, "README.md", shifted.String())
+
+	// 4. Rebuild index and query
+	db := rebuildTestIndex(t, paths)
+	defer db.Close()
+
+	// Query line 6 — MUST find the pending AI edit at corrected position
+	matches6, adjMap6 := queryLineBlame(db, "README.md", root, "6")
+	if len(matches6) == 0 {
+		t.Fatal("queryLineBlame for line 6 should find pending AI edit shifted from 3-5 to 6-8")
+	}
+	adj6 := adjMap6[matches6[0]]
+	if adj6 == nil {
+		t.Fatal("no adjustment for matched row")
+	}
+	for _, line := range []int{6, 7, 8} {
+		if !adj6.CurrentLines.Contains(line) {
+			t.Errorf("corrected position should contain line %d, got %s", line, adj6.CurrentLines.String())
+		}
+	}
+
+	// Query line 3 — MUST NOT find the AI edit (it shifted away)
+	matches3, _ := queryLineBlame(db, "README.md", root, "3")
+	for _, m := range matches3 {
+		if m.CommitSHA == "" && m.Change == "AI modified lines 3-5" {
+			t.Error("line 3 should NOT match the shifted AI edit")
+		}
+	}
+}
+
+// TestBlameAdjustFile_ManualInsertCorrectedPositions verifies that the
+// file-level query path also corrects pending edit positions for manual shifts.
+func TestBlameAdjustFile_ManualInsertCorrectedPositions(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
+
+	// 1. Create file with 10 lines, commit
+	writeTestFileAt(t, root, "README.md", generateLines(1, 10))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial file")
+
+	// 2. AI replaces lines 3-5
+	aiContent := "changed 3\nchanged 4\nchanged 5"
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(10, 3, 5))
+
+	ls, _ := lineset.FromString("3-5")
+	nl := 3
+	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+		ID:          "pending-1",
+		Ts:          "2025-01-01T00:01:00Z",
+		File:        "README.md",
+		Lines:       ls,
+		Hunk:        &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: nl},
+		ContentHash: record.ContentHash(aiContent),
+		Change:      "AI modified lines 3-5",
+		Tool:        "Edit",
+		Author:      "claude",
+	})
+
+	// 3. Manual insert of 5 lines at top — AI content shifts to 8-10
+	var shifted strings.Builder
+	for i := 1; i <= 5; i++ {
+		fmt.Fprintf(&shifted, "manual %d\n", i)
+	}
+	for i := 1; i <= 10; i++ {
+		if i >= 3 && i <= 5 {
+			fmt.Fprintf(&shifted, "changed %d\n", i)
+		} else {
+			fmt.Fprintf(&shifted, "line %d\n", i)
+		}
+	}
+	writeTestFileAt(t, root, "README.md", shifted.String())
+
+	// 4. Rebuild index and use blameAdjustFile
+	db := rebuildTestIndex(t, paths)
+	defer db.Close()
+
+	rows := queryFileRows(t, db, "README.md")
+	adjMap := blameAdjustFile(root, "README.md", rows)
+
+	// Find the pending edit
+	for _, row := range rows {
+		if row.CommitSHA != "" || row.Change != "AI modified lines 3-5" {
+			continue
+		}
+		adj := adjMap[row]
+		if adj == nil {
+			t.Fatal("no adjustment for pending AI edit")
+		}
+		// Should show corrected position 8-10, not original 3-5
+		for _, line := range []int{8, 9, 10} {
+			if !adj.CurrentLines.Contains(line) {
+				t.Errorf("corrected position should contain line %d, got %s", line, adj.CurrentLines.String())
+			}
+		}
+		for _, line := range []int{3, 4, 5} {
+			if adj.CurrentLines.Contains(line) {
+				t.Errorf("corrected position should NOT contain original line %d, got %s", line, adj.CurrentLines.String())
+			}
+		}
+	}
+}

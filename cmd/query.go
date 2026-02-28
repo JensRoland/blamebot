@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"github.com/jensroland/git-blamebot/internal/index"
 	"github.com/jensroland/git-blamebot/internal/linemap"
 	"github.com/jensroland/git-blamebot/internal/lineset"
+	"github.com/jensroland/git-blamebot/internal/record"
 )
 
 func relativePath(filePath, projectRoot string) string {
@@ -160,9 +162,12 @@ func queryLineBlame(db *sql.DB, rel, projectRoot, line string) ([]*index.ReasonR
 				if sim == nil || sim.Superseded {
 					continue
 				}
-				if !sim.CurrentLines.IsEmpty() && sim.CurrentLines.Overlaps(queryStart, queryEnd) {
-					adjMap[row] = &format.LineAdjustment{CurrentLines: sim.CurrentLines}
-					matches = append(matches, row)
+				if !sim.CurrentLines.IsEmpty() {
+					corrected := correctByContentHash(projectRoot, row, sim.CurrentLines)
+					if corrected.Overlaps(queryStart, queryEnd) {
+						adjMap[row] = &format.LineAdjustment{CurrentLines: corrected}
+						matches = append(matches, row)
+					}
 				}
 			}
 		}
@@ -173,9 +178,15 @@ func queryLineBlame(db *sql.DB, rel, projectRoot, line string) ([]*index.ReasonR
 			if sim == nil || sim.Superseded {
 				continue
 			}
-			if !sim.CurrentLines.IsEmpty() && sim.CurrentLines.Overlaps(queryStart, queryEnd) {
-				adjMap[row] = &format.LineAdjustment{CurrentLines: sim.CurrentLines}
-				matches = append(matches, row)
+			if !sim.CurrentLines.IsEmpty() {
+				currentLines := sim.CurrentLines
+				if row.CommitSHA == "" {
+					currentLines = correctByContentHash(projectRoot, row, currentLines)
+				}
+				if currentLines.Overlaps(queryStart, queryEnd) {
+					adjMap[row] = &format.LineAdjustment{CurrentLines: currentLines}
+					matches = append(matches, row)
+				}
 			}
 		}
 	}
@@ -206,8 +217,12 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 	if err != nil {
 		// Blame failed — use forward simulation for everything
 		for row, sim := range simMap {
+			currentLines := sim.CurrentLines
+			if row.CommitSHA == "" && !sim.Superseded && !currentLines.IsEmpty() {
+				currentLines = correctByContentHash(projectRoot, row, currentLines)
+			}
 			adjMap[row] = &format.LineAdjustment{
-				CurrentLines: sim.CurrentLines,
+				CurrentLines: currentLines,
 				Superseded:   sim.Superseded,
 			}
 		}
@@ -226,10 +241,14 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 		sim := simMap[row]
 
 		if row.CommitSHA == "" {
-			// Uncommitted: use forward simulation
+			// Uncommitted: use forward simulation, corrected by content hash
 			if sim != nil {
+				corrected := sim.CurrentLines
+				if !sim.Superseded && !corrected.IsEmpty() {
+					corrected = correctByContentHash(projectRoot, row, corrected)
+				}
 				adjMap[row] = &format.LineAdjustment{
-					CurrentLines: sim.CurrentLines,
+					CurrentLines: corrected,
 					Superseded:   sim.Superseded,
 				}
 			}
@@ -271,6 +290,79 @@ func constrainBySimulation(sim *linemap.AdjustedRow, blameLines lineset.LineSet)
 	}
 	// Intersection empty — forward sim likely wrong due to untracked shifts
 	return blameLines
+}
+
+// hashOfLines computes the ContentHash for file lines [start, end] (1-indexed).
+func hashOfLines(fileLines []string, start, end int) string {
+	if start < 1 || end > len(fileLines) || start > end {
+		return ""
+	}
+	region := strings.Join(fileLines[start-1:end], "\n")
+	return record.ContentHash(region)
+}
+
+// correctByContentHash verifies a simulated line position for a pending edit
+// against the actual file content. If the content at the simulated position
+// doesn't match the stored ContentHash, searches outward for a contiguous
+// block of NewLines lines whose hash matches. Returns the corrected LineSet,
+// or the original if no match is found or correction isn't applicable.
+func correctByContentHash(projectRoot string, row *index.ReasonRow, simLines lineset.LineSet) lineset.LineSet {
+	if row.ContentHash == "" {
+		return simLines
+	}
+	if row.Tool == "Write" {
+		return simLines
+	}
+	if row.NewLines == nil || *row.NewLines <= 0 {
+		return simLines
+	}
+
+	filePath := filepath.Join(projectRoot, row.File)
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return simLines
+	}
+	fileLines := strings.Split(string(data), "\n")
+	totalLines := len(fileLines)
+	blockSize := *row.NewLines
+
+	// Determine the search center
+	center := 0
+	if !simLines.IsEmpty() {
+		center = simLines.Min()
+	} else if row.LineStart != nil {
+		center = *row.LineStart
+	}
+	if center <= 0 {
+		return simLines
+	}
+
+	// Check the center position first
+	end := center + blockSize - 1
+	if end <= totalLines {
+		if hashOfLines(fileLines, center, end) == row.ContentHash {
+			return lineset.FromRange(center, end)
+		}
+	}
+
+	// Search outward from simulated center
+	const maxSearch = 200
+	for offset := 1; offset <= maxSearch; offset++ {
+		for _, candidate := range []int{center + offset, center - offset} {
+			if candidate < 1 {
+				continue
+			}
+			end := candidate + blockSize - 1
+			if end > totalLines {
+				continue
+			}
+			if hashOfLines(fileLines, candidate, end) == row.ContentHash {
+				return lineset.FromRange(candidate, end)
+			}
+		}
+	}
+
+	return simLines
 }
 
 // groupContiguous groups sorted line numbers into contiguous regions.

@@ -1,17 +1,14 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/jensroland/git-blamebot/internal/format"
-	gitutil "github.com/jensroland/git-blamebot/internal/git"
-	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/llm"
 	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
 	"github.com/jensroland/git-blamebot/internal/transcript"
 )
 
@@ -25,130 +22,54 @@ type fillEdit struct {
 	RecordIdx  int
 }
 
+// cmdFillReasons fills reasons for pending edits (manual fallback).
 func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
-	stagedFiles, err := gitutil.StagedJSONLFiles(projectRoot)
-	if err != nil || len(stagedFiles) == 0 {
-		fmt.Fprintln(os.Stderr, "No staged .blamebot/log/*.jsonl files found.")
+	pending, err := provenance.ReadAllPending(paths.GitDir)
+	if err != nil || len(pending) == 0 {
+		fmt.Fprintln(os.Stderr, "No pending edits found.")
 		return
 	}
 
-	// Read all records from staged files
-	type fileRecords struct {
-		records []map[string]interface{}
-	}
-	allRecords := make(map[string]*fileRecords)
-	needsFill := 0
-
-	for _, relPath := range stagedFiles {
-		absPath := filepath.Join(projectRoot, relPath)
-		data, err := os.ReadFile(absPath)
-		if err != nil {
-			continue
-		}
-
-		fr := &fileRecords{}
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			var rec map[string]interface{}
-			if err := json.Unmarshal([]byte(line), &rec); err != nil {
-				fr.records = append(fr.records, nil)
-				continue
-			}
-			fr.records = append(fr.records, rec)
-			reason, _ := rec["reason"].(string)
-			if reason == "" {
-				needsFill++
-			}
-		}
-		allRecords[relPath] = fr
-	}
-
-	if needsFill == 0 {
-		fmt.Fprintln(os.Stderr, "All records already have reasons.")
-		return
-	}
-
-	fmt.Fprintf(os.Stderr, "Found %d record(s) to fill across %d file(s).\n", needsFill, len(stagedFiles))
+	needsFill := len(pending) // all pending edits need reasons
+	fmt.Fprintf(os.Stderr, "Found %d pending edit(s) to fill.\n", needsFill)
 
 	// Group by transcript path
 	type transcriptGroup struct {
 		edits []fillEdit
 	}
 	groups := make(map[string]*transcriptGroup)
-	editID := 0
 
-	for relPath, fr := range allRecords {
-		for i, rec := range fr.records {
-			if rec == nil {
-				continue
-			}
-			reason, _ := rec["reason"].(string)
-			if reason != "" {
-				continue
-			}
-			trace, _ := rec["trace"].(string)
-			transcriptPath := ""
-			if idx := strings.Index(trace, "#"); idx >= 0 {
-				transcriptPath = trace[:idx]
-			}
-			if transcriptPath == "" {
-				continue
-			}
-			editID++
-
-			var lineStart, lineEnd *int
-			if linesVal, ok := rec["lines"]; ok && linesVal != nil {
-				switch lv := linesVal.(type) {
-				case string:
-					// New format: compact LineSet notation "5,7-8,12"
-					ls, err := lineset.FromString(lv)
-					if err == nil && !ls.IsEmpty() {
-						mn := ls.Min()
-						mx := ls.Max()
-						lineStart = &mn
-						lineEnd = &mx
-					}
-				case []interface{}:
-					// Legacy format: [start, end]
-					if len(lv) > 0 {
-						if v, ok := lv[0].(float64); ok {
-							n := int(v)
-							lineStart = &n
-						}
-					}
-					if len(lv) > 1 {
-						if v, ok := lv[1].(float64); ok {
-							n := int(v)
-							lineEnd = &n
-						}
-					}
-				}
-			}
-
-			file, _ := rec["file"].(string)
-			change, _ := rec["change"].(string)
-
-			g, ok := groups[transcriptPath]
-			if !ok {
-				g = &transcriptGroup{}
-				groups[transcriptPath] = g
-			}
-			g.edits = append(g.edits, fillEdit{
-				ID:         editID,
-				File:       file,
-				LineStart:  lineStart,
-				LineEnd:    lineEnd,
-				Change:     change,
-				SourceFile: relPath,
-				RecordIdx:  i,
-			})
+	for i, pe := range pending {
+		transcriptPath := ""
+		if idx := strings.Index(pe.Trace, "#"); idx >= 0 {
+			transcriptPath = pe.Trace[:idx]
 		}
+		if transcriptPath == "" {
+			continue
+		}
+
+		var lineStart, lineEnd *int
+		if !pe.Lines.IsEmpty() {
+			mn := pe.Lines.Min()
+			mx := pe.Lines.Max()
+			lineStart = &mn
+			lineEnd = &mx
+		}
+
+		g, ok := groups[transcriptPath]
+		if !ok {
+			g = &transcriptGroup{}
+			groups[transcriptPath] = g
+		}
+		g.edits = append(g.edits, fillEdit{
+			ID:        i + 1,
+			File:      pe.File,
+			LineStart: lineStart,
+			LineEnd:   lineEnd,
+			Change:    pe.Change,
+		})
 	}
 
-	// Process each transcript group
 	reasonMap := make(map[int]string)
 
 	for transcriptPath, group := range groups {
@@ -157,11 +78,13 @@ func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
 		if len(sessionPrompts) == 0 {
 			seen := make(map[string]bool)
 			for _, edit := range group.edits {
-				rec := allRecords[edit.SourceFile].records[edit.RecordIdx]
-				p, _ := rec["prompt"].(string)
-				if p != "" && !seen[p] {
-					sessionPrompts = append(sessionPrompts, p)
-					seen[p] = true
+				idx := edit.ID - 1
+				if idx >= 0 && idx < len(pending) {
+					p := pending[idx].Prompt
+					if p != "" && !seen[p] {
+						sessionPrompts = append(sessionPrompts, p)
+						seen[p] = true
+					}
 				}
 			}
 		}
@@ -200,55 +123,6 @@ func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
 		fmt.Fprintf(os.Stderr, " → %d reasons\n", filled)
 	}
 
-	// Extract and write trace contexts
-	tracesDir := filepath.Join(projectRoot, ".blamebot", "traces")
-	if !dryRun {
-		_ = os.MkdirAll(tracesDir, 0o755)
-	}
-
-	for transcriptPath, group := range groups {
-		var toolUseIDs []string
-		for _, edit := range group.edits {
-			rec := allRecords[edit.SourceFile].records[edit.RecordIdx]
-			trace, _ := rec["trace"].(string)
-			if idx := strings.Index(trace, "#"); idx >= 0 {
-				toolUseIDs = append(toolUseIDs, trace[idx+1:])
-			}
-		}
-
-		if len(toolUseIDs) == 0 {
-			continue
-		}
-
-		contexts := transcript.ExtractTraceContexts(transcriptPath, toolUseIDs)
-		if len(contexts) == 0 {
-			continue
-		}
-
-		sessionID := filepath.Base(transcriptPath)
-		sessionID = strings.TrimSuffix(sessionID, filepath.Ext(sessionID))
-
-		if dryRun {
-			fmt.Printf("%s  Traces: %d context(s) for session %s...%s\n",
-				format.Dim, len(contexts), sessionID[:min(len(sessionID), 12)], format.Reset)
-			continue
-		}
-
-		tracesFile := filepath.Join(tracesDir, sessionID+".json")
-		existing := make(map[string]string)
-		if data, err := os.ReadFile(tracesFile); err == nil {
-			_ = json.Unmarshal(data, &existing)
-		}
-		for k, v := range contexts {
-			existing[k] = v
-		}
-		b, _ := json.MarshalIndent(existing, "", "  ")
-		_ = os.WriteFile(tracesFile, append(b, '\n'), 0o644)
-
-		rel, _ := filepath.Rel(projectRoot, tracesFile)
-		_ = gitutil.StageFile(projectRoot, rel)
-	}
-
 	if dryRun {
 		return
 	}
@@ -258,48 +132,7 @@ func cmdFillReasons(paths project.Paths, projectRoot string, dryRun bool) {
 		return
 	}
 
-	// Patch JSONL files in place
-	patched := 0
-	for relPath, fr := range allRecords {
-		changed := false
-		for i, rec := range fr.records {
-			if rec == nil {
-				continue
-			}
-			for _, group := range groups {
-				for _, edit := range group.edits {
-					if edit.SourceFile == relPath && edit.RecordIdx == i {
-						if reason, ok := reasonMap[edit.ID]; ok {
-							rec["reason"] = reason
-							changed = true
-							patched++
-						}
-					}
-				}
-			}
-		}
-
-		if changed {
-			absPath := filepath.Join(projectRoot, relPath)
-			f, err := os.Create(absPath)
-			if err != nil {
-				continue
-			}
-			for _, rec := range fr.records {
-				if rec != nil {
-					b, _ := json.Marshal(rec)
-					fmt.Fprintf(f, "%s\n", b)
-				}
-			}
-			f.Close()
-			_ = gitutil.StageFile(projectRoot, relPath)
-		}
-	}
-
-	fmt.Fprintf(os.Stderr, "Filled %d reason(s). Index will rebuild on next query.\n", patched)
-
-	// Force index rebuild
-	_ = os.Remove(paths.IndexDB)
+	fmt.Fprintf(os.Stderr, "Filled %d reason(s). They will be included in the next commit's manifest.\n", len(reasonMap))
 }
 
 func buildFillPrompt(sessionPrompts []string, edits []fillEdit) string {

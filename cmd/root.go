@@ -88,8 +88,8 @@ Subcommands:
 		return
 	}
 
-	if _, err := os.Stat(paths.LogDir); os.IsNotExist(err) {
-		fmt.Fprintln(os.Stderr, "No .blamebot/log/ directory found.")
+	if !project.IsInitialized(root) {
+		fmt.Fprintln(os.Stderr, "No provenance branch found.")
 		fmt.Fprintln(os.Stderr, "Run 'git-blamebot enable' in this repo first.")
 		os.Exit(1)
 	}

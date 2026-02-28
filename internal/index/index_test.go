@@ -1,49 +1,82 @@
 package index
 
 import (
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
+	"github.com/jensroland/git-blamebot/internal/record"
 )
 
 func setupTestPaths(t *testing.T) (project.Paths, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
+	initRepo(t, tmpDir)
 
-	logDir := filepath.Join(tmpDir, ".blamebot", "log")
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	os.MkdirAll(cacheDir, 0o755)
 
 	paths := project.Paths{
-		Root:     tmpDir,
-		LogDir:   logDir,
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: filepath.Join(cacheDir, "pending"),
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 	return paths, func() {}
 }
 
-func writeJSONL(t *testing.T, dir, filename, content string) {
+func initRepo(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+	runGit(t, dir, "init")
+	runGit(t, dir, "config", "user.name", "Test")
+	runGit(t, dir, "config", "user.email", "test@test.com")
+	runGit(t, dir, "commit", "--allow-empty", "-m", "init")
+	if err := provenance.InitBranch(dir); err != nil {
+		t.Fatalf("InitBranch: %v", err)
 	}
 }
 
-func TestRebuild_NewStringFormat(t *testing.T) {
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func writeTestManifest(t *testing.T, paths project.Paths, m provenance.Manifest) {
+	t.Helper()
+	if err := provenance.WriteManifest(paths.Root, paths.GitDir, m); err != nil {
+		t.Fatalf("WriteManifest: %v", err)
+	}
+}
+
+func TestRebuild_LineSetFormat(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl", `{"file":"src/main.go","lines":"5,7-8,12","ts":"2025-01-01T00:00:00Z","change":"test","tool":"Edit","hunk":{"old_start":5,"old_lines":8,"new_start":5,"new_lines":8}}
-`)
+	ls, _ := lineset.FromString("5,7-8,12")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "src/main.go",
+				Lines:  ls,
+				Change: "test",
+				Tool:   "Edit",
+				Hunk:   &record.HunkInfo{OldStart: 5, OldLines: 8, NewStart: 5, NewLines: 8},
+			},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -65,18 +98,15 @@ func TestRebuild_NewStringFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify changed_lines stored as-is
 	if row.ChangedLines == nil || *row.ChangedLines != "5,7-8,12" {
 		t.Errorf("changed_lines = %v, want '5,7-8,12'", row.ChangedLines)
 	}
-	// Verify bounding range derived from Min/Max
 	if row.LineStart == nil || *row.LineStart != 5 {
 		t.Errorf("line_start = %v, want 5", row.LineStart)
 	}
 	if row.LineEnd == nil || *row.LineEnd != 12 {
 		t.Errorf("line_end = %v, want 12", row.LineEnd)
 	}
-	// Verify hunk data
 	if row.OldStart == nil || *row.OldStart != 5 {
 		t.Errorf("old_start = %v, want 5", row.OldStart)
 	}
@@ -85,51 +115,18 @@ func TestRebuild_NewStringFormat(t *testing.T) {
 	}
 }
 
-func TestRebuild_LegacyArrayFormat(t *testing.T) {
+func TestRebuild_EmptyLines(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl", `{"file":"src/main.go","lines":[5,12],"ts":"2025-01-01T00:00:00Z","change":"test"}
-`)
-
-	db, err := Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	rows, err := db.Query("SELECT * FROM reasons")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rows.Close()
-
-	if !rows.Next() {
-		t.Fatal("expected 1 row")
-	}
-	row, err := ScanRow(rows)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Legacy format: no changed_lines
-	if row.ChangedLines != nil {
-		t.Errorf("changed_lines should be nil for legacy format, got %q", *row.ChangedLines)
-	}
-	if row.LineStart == nil || *row.LineStart != 5 {
-		t.Errorf("line_start = %v, want 5", row.LineStart)
-	}
-	if row.LineEnd == nil || *row.LineEnd != 12 {
-		t.Errorf("line_end = %v, want 12", row.LineEnd)
-	}
-}
-
-func TestRebuild_LegacyNullLines(t *testing.T) {
-	paths, cleanup := setupTestPaths(t)
-	defer cleanup()
-
-	writeJSONL(t, paths.LogDir, "session.jsonl", `{"file":"src/main.go","lines":[null,null],"ts":"2025-01-01T00:00:00Z","change":"test"}
-`)
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "src/main.go", Change: "test"},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -166,9 +163,20 @@ func TestRebuild_HunkMetadata(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"f.go","lines":"10-12","ts":"2025-01-01T00:00:00Z","change":"test","hunk":{"old_start":10,"old_lines":5,"new_start":10,"new_lines":3}}
-`)
+	ls, _ := lineset.FromString("10-12")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "f.go",
+				Lines:  ls,
+				Change: "test",
+				Hunk:   &record.HunkInfo{OldStart: 10, OldLines: 5, NewStart: 10, NewLines: 3},
+			},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -208,9 +216,15 @@ func TestRebuild_NoHunk(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"f.go","lines":"5","ts":"2025-01-01T00:00:00Z","change":"test"}
-`)
+	ls, _ := lineset.FromString("5")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "f.go", Lines: ls, Change: "test"},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -241,10 +255,15 @@ func TestRebuild_ChangeFallback(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	// Empty "change" field, non-empty "reason" → should use reason as change
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"f.go","lines":"5","ts":"2025-01-01T00:00:00Z","reason":"added logging"}
-`)
+	ls, _ := lineset.FromString("5")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "f.go", Lines: ls, Reason: "added logging"},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -271,17 +290,31 @@ func TestRebuild_ChangeFallback(t *testing.T) {
 	}
 }
 
-func TestRebuild_MultipleFiles(t *testing.T) {
+func TestRebuild_MultipleManifests(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "aaa-session1.jsonl",
-		`{"file":"a.go","lines":"1","ts":"2025-01-01T00:00:00Z","change":"first"}
-{"file":"b.go","lines":"2","ts":"2025-01-01T00:01:00Z","change":"second"}
-`)
-	writeJSONL(t, paths.LogDir, "bbb-session2.jsonl",
-		`{"file":"c.go","lines":"3","ts":"2025-01-01T00:02:00Z","change":"third"}
-`)
+	ls1, _ := lineset.FromString("1")
+	ls2, _ := lineset.FromString("2")
+	ls3, _ := lineset.FromString("3")
+
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "aaa-manifest1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "a.go", Lines: ls1, Change: "first"},
+			{File: "b.go", Lines: ls2, Change: "second"},
+		},
+	})
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "bbb-manifest2",
+		Timestamp: "2025-01-01T00:02:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "c.go", Lines: ls3, Change: "third"},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -289,7 +322,6 @@ func TestRebuild_MultipleFiles(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Count total records
 	var count int
 	err = db.QueryRow("SELECT COUNT(*) FROM reasons").Scan(&count)
 	if err != nil {
@@ -299,7 +331,7 @@ func TestRebuild_MultipleFiles(t *testing.T) {
 		t.Errorf("total records = %d, want 3", count)
 	}
 
-	// Verify source_file is set correctly (deterministic ordering by filename)
+	// source_file stores manifest ID
 	rows, err := db.Query("SELECT source_file FROM reasons ORDER BY id")
 	if err != nil {
 		t.Fatal(err)
@@ -317,46 +349,17 @@ func TestRebuild_MultipleFiles(t *testing.T) {
 	if len(sources) != 3 {
 		t.Fatalf("expected 3 sources, got %d", len(sources))
 	}
-	if sources[0] != "aaa-session1.jsonl" || sources[1] != "aaa-session1.jsonl" {
-		t.Errorf("first two records should be from aaa-session1.jsonl, got %v", sources[:2])
-	}
-	if sources[2] != "bbb-session2.jsonl" {
-		t.Errorf("third record should be from bbb-session2.jsonl, got %s", sources[2])
-	}
-}
-
-func TestRebuild_SkipsInvalidJSON(t *testing.T) {
-	paths, cleanup := setupTestPaths(t)
-	defer cleanup()
-
-	writeJSONL(t, paths.LogDir, "session.jsonl", fmt.Sprintf(
-		"%s\n%s\n%s\n",
-		`{"file":"a.go","lines":"1","ts":"2025-01-01T00:00:00Z","change":"valid1"}`,
-		`not json at all`,
-		`{"file":"b.go","lines":"2","ts":"2025-01-01T00:01:00Z","change":"valid2"}`,
-	))
-
-	db, err := Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	var count int
-	err = db.QueryRow("SELECT COUNT(*) FROM reasons").Scan(&count)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if count != 2 {
-		t.Errorf("total records = %d, want 2 (invalid line skipped)", count)
+	for _, s := range sources {
+		if s != "aaa-manifest1" && s != "bbb-manifest2" {
+			t.Errorf("unexpected source_file %q", s)
+		}
 	}
 }
 
-func TestRebuild_EmptyLogDir(t *testing.T) {
+func TestRebuild_NoManifests(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	// No JSONL files
 	db, err := Rebuild(paths, true)
 	if err != nil {
 		t.Fatal(err)
@@ -528,9 +531,27 @@ func TestRebuild_AllFields(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"main.go","lines":"5,7-8","ts":"2025-01-15T12:00:00Z","content_hash":"abc123","prompt":"fix bug","reason":"fixed it","change":"a → b","tool":"Edit","author":"claude","session":"sess-123","trace":"transcript#tool-1","hunk":{"old_start":5,"old_lines":4,"new_start":5,"new_lines":3}}
-`)
+	ls, _ := lineset.FromString("5,7-8")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m-all",
+		CommitSHA: "abc123def456",
+		Author:    "claude",
+		Timestamp: "2025-01-15T12:00:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:        "main.go",
+				Lines:       ls,
+				ContentHash: "abc123",
+				Prompt:      "fix bug",
+				Reason:      "fixed it",
+				Change:      "a \u2192 b",
+				Tool:        "Edit",
+				Session:     "sess-123",
+				Trace:       "transcript#tool-1",
+				Hunk:        &record.HunkInfo{OldStart: 5, OldLines: 4, NewStart: 5, NewLines: 3},
+			},
+		},
+	})
 
 	db, err := Rebuild(paths, true)
 	if err != nil {
@@ -578,5 +599,8 @@ func TestRebuild_AllFields(t *testing.T) {
 	}
 	if row.ChangedLines == nil || *row.ChangedLines != "5,7-8" {
 		t.Errorf("changed_lines = %v", row.ChangedLines)
+	}
+	if row.CommitSHA != "abc123def456" {
+		t.Errorf("commit_sha = %q", row.CommitSHA)
 	}
 }

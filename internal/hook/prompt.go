@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,7 +28,6 @@ type promptState struct {
 	Prompt         string `json:"prompt"`
 	PromptRaw      string `json:"prompt_raw"`
 	Timestamp      string `json:"timestamp"`
-	SessionFile    string `json:"session_file"`
 	Author         string `json:"author"`
 	SessionID      string `json:"session_id"`
 	TranscriptPath string `json:"transcript_path"`
@@ -77,24 +75,18 @@ func HandlePromptSubmit(r io.Reader) error {
 	sessionID, _ := data["session_id"].(string)
 	transcriptPath, _ := data["transcript_path"].(string)
 
-	// Generate session filename
 	now := time.Now().UTC()
-	ts := now.Format("20060102T150405Z")
-	randStr := randomString(6)
-	sessionFilename := fmt.Sprintf("%s-%s.jsonl", ts, randStr)
 
 	state := promptState{
 		Prompt:         prompt,
 		PromptRaw:      rawPrompt,
 		Timestamp:      now.Format("2006-01-02T15:04:05Z"),
-		SessionFile:    sessionFilename,
 		Author:         git.Author(),
 		SessionID:      sessionID,
 		TranscriptPath: transcriptPath,
 	}
 
 	_ = os.MkdirAll(paths.CacheDir, 0o755)
-	_ = os.MkdirAll(paths.LogDir, 0o755)
 
 	stateFile := filepath.Join(paths.CacheDir, "current_prompt.json")
 	b, err := json.MarshalIndent(state, "", "  ")
@@ -107,14 +99,4 @@ func HandlePromptSubmit(r io.Reader) error {
 
 	debug.Log(paths.CacheDir, "capture_prompt.log", "Stashed prompt state", state)
 	return nil
-}
-
-const alphanumChars = "abcdefghijklmnopqrstuvwxyz0123456789"
-
-func randomString(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = alphanumChars[rand.Intn(len(alphanumChars))]
-	}
-	return string(b)
 }

@@ -39,22 +39,6 @@ func BlameRange(root, file string, start, end int) (map[int]BlameEntry, error) {
 	return parsePorcelainBlame(out), nil
 }
 
-// BlameJSONLLines runs git blame on a JSONL file and returns commit SHA per line number.
-// Used during index rebuild to populate commit_sha.
-func BlameJSONLLines(root, jsonlFile string) (map[int]string, error) {
-	entries, err := BlameFile(root, jsonlFile)
-	if err != nil {
-		return nil, err
-	}
-	result := make(map[int]string, len(entries))
-	for lineNum, entry := range entries {
-		if !entry.IsUncommitted() {
-			result[lineNum] = entry.SHA
-		}
-	}
-	return result, nil
-}
-
 // parsePorcelainBlame parses git blame --porcelain output.
 //
 // Porcelain format:

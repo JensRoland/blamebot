@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -40,17 +41,11 @@ func ReadTraceContext(traceRef string, projectRoot string) string {
 		toolUseID = parts[1]
 	}
 
-	// 1. Try committed traces (portable)
+	// 1. Try provenance branch traces
 	if projectRoot != "" && toolUseID != "" && transcriptPath != "" {
 		sessionID := strings.TrimSuffix(filepath.Base(transcriptPath), filepath.Ext(transcriptPath))
-		tracesFile := filepath.Join(projectRoot, ".blamebot", "traces", sessionID+".json")
-		if data, err := os.ReadFile(tracesFile); err == nil {
-			var traces map[string]string
-			if json.Unmarshal(data, &traces) == nil {
-				if ctx, ok := traces[toolUseID]; ok && ctx != "" {
-					return ctx
-				}
-			}
+		if ctx := readTraceFromProvenance(projectRoot, sessionID, toolUseID); ctx != "" {
+			return ctx
 		}
 	}
 
@@ -362,4 +357,26 @@ func walkBackwards(entries []transcriptEntry, targetIdx int) string {
 	}
 
 	return fmt.Sprintf("Tool call found at entry %d, but no thinking/text blocks found before it", targetIdx)
+}
+
+// readTraceFromProvenance reads a trace context from the provenance branch.
+func readTraceFromProvenance(root, sessionID, toolUseID string) string {
+	data, err := readProvBlob(root, "traces/"+sessionID+".json")
+	if err != nil {
+		return ""
+	}
+	var traces map[string]string
+	if json.Unmarshal(data, &traces) == nil {
+		if ctx, ok := traces[toolUseID]; ok && ctx != "" {
+			return ctx
+		}
+	}
+	return ""
+}
+
+// readProvBlob reads a file from the blamebot-provenance branch.
+func readProvBlob(root, path string) ([]byte, error) {
+	cmd := exec.Command("git", "show", "blamebot-provenance:"+path)
+	cmd.Dir = root
+	return cmd.Output()
 }

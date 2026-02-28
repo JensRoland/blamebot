@@ -10,12 +10,11 @@ import (
 
 // Paths holds all relevant directories for a blamebot-enabled repo.
 type Paths struct {
-	Root      string // git repo root
-	GitDir    string // actual .git directory (resolved for worktrees)
-	LogDir    string // .blamebot/log/
-	TracesDir string // .blamebot/traces/
-	CacheDir  string // <gitdir>/blamebot/
-	IndexDB   string // <gitdir>/blamebot/index.db
+	Root       string // git repo root
+	GitDir     string // actual .git directory (resolved for worktrees)
+	PendingDir string // <gitdir>/blamebot/pending/
+	CacheDir   string // <gitdir>/blamebot/
+	IndexDB    string // <gitdir>/blamebot/index.db
 }
 
 // FindRoot returns the git project root, preferring CLAUDE_PROJECT_DIR if set.
@@ -33,13 +32,13 @@ func FindRoot() (string, error) {
 // NewPaths constructs all path constants from a project root.
 func NewPaths(root string) Paths {
 	gitDir := resolveGitDir(root)
+	cacheDir := filepath.Join(gitDir, "blamebot")
 	return Paths{
-		Root:      root,
-		GitDir:    gitDir,
-		LogDir:    filepath.Join(root, ".blamebot", "log"),
-		TracesDir: filepath.Join(root, ".blamebot", "traces"),
-		CacheDir:  filepath.Join(gitDir, "blamebot"),
-		IndexDB:   filepath.Join(gitDir, "blamebot", "index.db"),
+		Root:       root,
+		GitDir:     gitDir,
+		PendingDir: filepath.Join(cacheDir, "pending"),
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 }
 
@@ -70,8 +69,16 @@ func resolveGitDir(root string) string {
 	return gitdir
 }
 
-// IsInitialized returns true if .blamebot/ directory exists.
+// IsInitialized returns true if the provenance branch exists
+// or the legacy .blamebot/ directory exists.
 func IsInitialized(root string) bool {
+	// New: check provenance branch
+	cmd := exec.Command("git", "rev-parse", "--verify", "--quiet", "blamebot-provenance")
+	cmd.Dir = root
+	if cmd.Run() == nil {
+		return true
+	}
+	// Legacy: check .blamebot/ directory
 	info, err := os.Stat(filepath.Join(root, ".blamebot"))
 	return err == nil && info.IsDir()
 }

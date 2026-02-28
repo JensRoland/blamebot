@@ -382,10 +382,17 @@ func TestOpen_Fresh(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"src/app.go","lines":"1-5","ts":"2025-01-01T00:00:00Z","change":"initial setup","tool":"Write","author":"alice"}
-{"file":"src/app.go","lines":"10","ts":"2025-01-02T00:00:00Z","change":"add logging","tool":"Edit","author":"bob"}
-`)
+	ls1, _ := lineset.FromString("1-5")
+	ls2, _ := lineset.FromString("10")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m-open-fresh",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "alice",
+		Edits: []provenance.ManifestEdit{
+			{File: "src/app.go", Lines: ls1, Change: "initial setup", Tool: "Write"},
+			{File: "src/app.go", Lines: ls2, Change: "add logging", Tool: "Edit"},
+		},
+	})
 
 	// No existing index — Open should build one (IsStale returns true when DB doesn't exist)
 	db, err := Open(paths, false)
@@ -422,10 +429,15 @@ func TestOpen_ForceRebuild(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	// Write initial JSONL with 1 record
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"src/app.go","lines":"1","ts":"2025-01-01T00:00:00Z","change":"first record","tool":"Edit"}
-`)
+	ls1, _ := lineset.FromString("1")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m-force-1",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "src/app.go", Lines: ls1, Change: "first record", Tool: "Edit"},
+		},
+	})
 
 	// Build initial index
 	db1, err := Open(paths, false)
@@ -440,11 +452,16 @@ func TestOpen_ForceRebuild(t *testing.T) {
 		t.Fatalf("expected 1 record initially, got %d", count1)
 	}
 
-	// Add another record to the JSONL
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"src/app.go","lines":"1","ts":"2025-01-01T00:00:00Z","change":"first record","tool":"Edit"}
-{"file":"src/app.go","lines":"5","ts":"2025-01-02T00:00:00Z","change":"second record","tool":"Edit"}
-`)
+	// Add another manifest to the provenance branch
+	ls2, _ := lineset.FromString("5")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m-force-2",
+		Timestamp: "2025-01-02T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "src/app.go", Lines: ls2, Change: "second record", Tool: "Edit"},
+		},
+	})
 
 	// Force rebuild should pick up the new record
 	db2, err := Open(paths, true)
@@ -467,9 +484,15 @@ func TestOpen_ExistingNotStale(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"src/app.go","lines":"1","ts":"2025-01-01T00:00:00Z","change":"test","tool":"Edit"}
-`)
+	ls, _ := lineset.FromString("1")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m-notstale",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "src/app.go", Lines: ls, Change: "test", Tool: "Edit"},
+		},
+	})
 
 	// Build initial index
 	db1, err := Rebuild(paths, true)
@@ -478,7 +501,7 @@ func TestOpen_ExistingNotStale(t *testing.T) {
 	}
 	db1.Close()
 
-	// Open again — index exists and JSONL hasn't changed, so Open should
+	// Open again — index exists and provenance hasn't changed, so Open should
 	// just open the existing DB (no rebuild).
 	db2, err := Open(paths, false)
 	if err != nil {
@@ -510,9 +533,15 @@ func TestIsStale_FreshIndex(t *testing.T) {
 	paths, cleanup := setupTestPaths(t)
 	defer cleanup()
 
-	writeJSONL(t, paths.LogDir, "session.jsonl",
-		`{"file":"a.go","lines":"1","ts":"2025-01-01T00:00:00Z","change":"test"}
-`)
+	ls, _ := lineset.FromString("1")
+	writeTestManifest(t, paths, provenance.Manifest{
+		ID:        "m-fresh",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Author:    "test",
+		Edits: []provenance.ManifestEdit{
+			{File: "a.go", Lines: ls, Change: "test"},
+		},
+	})
 
 	// Build index
 	db, err := Rebuild(paths, true)
@@ -521,7 +550,7 @@ func TestIsStale_FreshIndex(t *testing.T) {
 	}
 	db.Close()
 
-	// Index is fresh (no JSONL changes since rebuild)
+	// Index is fresh (no provenance changes since rebuild)
 	if IsStale(paths) {
 		t.Error("expected IsStale=false when index is fresh")
 	}

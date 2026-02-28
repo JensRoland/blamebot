@@ -17,26 +17,24 @@ func setupTestDBWithArrow(t *testing.T) (*sql.DB, project.Paths, string) {
 
 	tmpDir := t.TempDir()
 
-	logDir := filepath.Join(tmpDir, ".blamebot", "log")
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
-	if err := os.MkdirAll(logDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+	pendingDir := filepath.Join(cacheDir, "pending")
+	if err := os.MkdirAll(pendingDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	paths := project.Paths{
-		Root:     tmpDir,
-		LogDir:   logDir,
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: pendingDir,
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 
-	// Write a session with an arrow-format change summary
-	session := `{"file":"src/config.go","lines":"10","ts":"2025-03-01T00:00:00Z","prompt":"rename variable","reason":"Renamed for clarity","change":"oldName \u2192 newName","tool":"Edit","author":"alice","session":"sess-ccc","trace":"","content_hash":"hash5"}` + "\n"
+	// Write a pending edit with an arrow-format change summary
+	pendingData := `{"id":"edit-ccc","file":"src/config.go","lines":"10","ts":"2025-03-01T00:00:00Z","prompt":"rename variable","change":"oldName \u2192 newName","tool":"Edit","author":"alice","session":"sess-ccc","trace":"","content_hash":"hash5"}`
 
-	if err := os.WriteFile(filepath.Join(logDir, "ccc-session.jsonl"), []byte(session), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(pendingDir, "edit-ccc.json"), []byte(pendingData), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,20 +143,20 @@ func TestCmdExplain_FileNotFound(t *testing.T) {
 
 func TestCmdExplain_WithAddedChange(t *testing.T) {
 	tmpDir := t.TempDir()
-	logDir := filepath.Join(tmpDir, ".blamebot", "log")
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
-	_ = os.MkdirAll(logDir, 0o755)
-	_ = os.MkdirAll(cacheDir, 0o755)
+	pendingDir := filepath.Join(cacheDir, "pending")
+	_ = os.MkdirAll(pendingDir, 0o755)
 
 	paths := project.Paths{
-		Root:     tmpDir,
-		LogDir:   logDir,
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: pendingDir,
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 
-	session := `{"file":"src/new.go","lines":"1-5","ts":"2025-03-01T00:00:00Z","prompt":"create file","change":"added: package main\nfunc init() {}","tool":"Write","author":"alice"}` + "\n"
-	_ = os.WriteFile(filepath.Join(logDir, "session.jsonl"), []byte(session), 0o644)
+	pending := `{"id":"edit-1","file":"src/new.go","lines":"1-5","ts":"2025-03-01T00:00:00Z","prompt":"create file","change":"added: package main\nfunc init() {}","tool":"Write","author":"alice"}`
+	_ = os.WriteFile(filepath.Join(pendingDir, "edit-1.json"), []byte(pending), 0o644)
 
 	db, err := index.Rebuild(paths, true)
 	if err != nil {
@@ -177,20 +175,20 @@ func TestCmdExplain_WithAddedChange(t *testing.T) {
 
 func TestCmdExplain_WithRemovedChange(t *testing.T) {
 	tmpDir := t.TempDir()
-	logDir := filepath.Join(tmpDir, ".blamebot", "log")
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
-	_ = os.MkdirAll(logDir, 0o755)
-	_ = os.MkdirAll(cacheDir, 0o755)
+	pendingDir := filepath.Join(cacheDir, "pending")
+	_ = os.MkdirAll(pendingDir, 0o755)
 
 	paths := project.Paths{
-		Root:     tmpDir,
-		LogDir:   logDir,
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: pendingDir,
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 
-	session := `{"file":"src/old.go","lines":"1","ts":"2025-03-01T00:00:00Z","prompt":"clean up","change":"removed: obsolete_func()","tool":"Edit","author":"bob"}` + "\n"
-	_ = os.WriteFile(filepath.Join(logDir, "session.jsonl"), []byte(session), 0o644)
+	pending := `{"id":"edit-1","file":"src/old.go","lines":"1","ts":"2025-03-01T00:00:00Z","prompt":"clean up","change":"removed: obsolete_func()","tool":"Edit","author":"bob"}`
+	_ = os.WriteFile(filepath.Join(pendingDir, "edit-1.json"), []byte(pending), 0o644)
 
 	db, err := index.Rebuild(paths, true)
 	if err != nil {

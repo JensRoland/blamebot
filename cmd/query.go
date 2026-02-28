@@ -218,12 +218,16 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 		// Blame failed — use forward simulation for everything
 		for row, sim := range simMap {
 			currentLines := sim.CurrentLines
-			if row.CommitSHA == "" && !sim.Superseded && !currentLines.IsEmpty() {
+			superseded := sim.Superseded
+			if row.CommitSHA == "" && !superseded && !currentLines.IsEmpty() {
 				currentLines = correctByContentHash(projectRoot, row, currentLines)
+				if currentLines.IsEmpty() {
+					superseded = true
+				}
 			}
 			adjMap[row] = &format.LineAdjustment{
 				CurrentLines: currentLines,
-				Superseded:   sim.Superseded,
+				Superseded:   superseded,
 			}
 		}
 		return adjMap
@@ -244,12 +248,16 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 			// Uncommitted: use forward simulation, corrected by content hash
 			if sim != nil {
 				corrected := sim.CurrentLines
-				if !sim.Superseded && !corrected.IsEmpty() {
+				superseded := sim.Superseded
+				if !superseded && !corrected.IsEmpty() {
 					corrected = correctByContentHash(projectRoot, row, corrected)
+					if corrected.IsEmpty() {
+						superseded = true
+					}
 				}
 				adjMap[row] = &format.LineAdjustment{
 					CurrentLines: corrected,
-					Superseded:   sim.Superseded,
+					Superseded:   superseded,
 				}
 			}
 			continue
@@ -304,8 +312,13 @@ func hashOfLines(fileLines []string, start, end int) string {
 // correctByContentHash verifies a simulated line position for a pending edit
 // against the actual file content. If the content at the simulated position
 // doesn't match the stored ContentHash, searches outward for a contiguous
-// block of NewLines lines whose hash matches. Returns the corrected LineSet,
-// or the original if no match is found or correction isn't applicable.
+// block of NewLines lines whose hash matches.
+//
+// Returns:
+//   - Corrected LineSet if content found at a different position (shifted)
+//   - Same LineSet if content matches at simulated position (correct)
+//   - Empty LineSet if content not found anywhere (deleted/modified → superseded)
+//   - Original simLines if correction isn't applicable (no hash, Write tool, etc.)
 func correctByContentHash(projectRoot string, row *index.ReasonRow, simLines lineset.LineSet) lineset.LineSet {
 	if row.ContentHash == "" {
 		return simLines
@@ -320,7 +333,8 @@ func correctByContentHash(projectRoot string, row *index.ReasonRow, simLines lin
 	filePath := filepath.Join(projectRoot, row.File)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return simLines
+		// File deleted entirely — content is gone
+		return lineset.LineSet{}
 	}
 	fileLines := strings.Split(string(data), "\n")
 	totalLines := len(fileLines)
@@ -362,7 +376,9 @@ func correctByContentHash(projectRoot string, row *index.ReasonRow, simLines lin
 		}
 	}
 
-	return simLines
+	// Content not found anywhere in the file — it was deleted or modified.
+	// Return empty to signal superseded.
+	return lineset.LineSet{}
 }
 
 // groupContiguous groups sorted line numbers into contiguous regions.

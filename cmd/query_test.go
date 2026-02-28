@@ -468,7 +468,7 @@ func TestCorrectByContentHash(t *testing.T) {
 		}
 	})
 
-	t.Run("content modified — falls back to simulation", func(t *testing.T) {
+	t.Run("content modified — returns empty (superseded)", func(t *testing.T) {
 		// AI wrote "AI one\nAI two\nAI three" but user modified it
 		content := "line 1\nline 2\nmodified one\nmodified two\nmodified three\nline 6\n"
 		root := setup(t, content)
@@ -480,9 +480,9 @@ func TestCorrectByContentHash(t *testing.T) {
 			Tool:        "Edit",
 		}
 		got := correctByContentHash(root, row, lineset.FromRange(3, 5))
-		// Content not found anywhere — should return original simulated position
-		if got.String() != "3-5" {
-			t.Errorf("expected fallback to 3-5, got %s", got.String())
+		// Content not found anywhere — should return empty (superseded)
+		if !got.IsEmpty() {
+			t.Errorf("expected empty (superseded), got %s", got.String())
 		}
 	})
 
@@ -527,7 +527,7 @@ func TestCorrectByContentHash(t *testing.T) {
 		}
 	})
 
-	t.Run("file not found — no correction", func(t *testing.T) {
+	t.Run("file deleted — returns empty (superseded)", func(t *testing.T) {
 		row := &index.ReasonRow{
 			File:        "nonexistent.txt",
 			ContentHash: record.ContentHash("test"),
@@ -535,8 +535,25 @@ func TestCorrectByContentHash(t *testing.T) {
 			Tool:        "Edit",
 		}
 		got := correctByContentHash("/no/such/dir", row, lineset.FromRange(1, 1))
-		if got.String() != "1" {
-			t.Errorf("expected 1, got %s", got.String())
+		if !got.IsEmpty() {
+			t.Errorf("expected empty (superseded), got %s", got.String())
+		}
+	})
+
+	t.Run("AI lines deleted from file — returns empty (superseded)", func(t *testing.T) {
+		// AI wrote 3 lines, user deleted them entirely
+		content := "line 1\nline 2\nline 6\nline 7\n"
+		root := setup(t, content)
+		aiContent := "AI one\nAI two\nAI three"
+		row := &index.ReasonRow{
+			File:        "test.txt",
+			ContentHash: record.ContentHash(aiContent),
+			NewLines:    newLines(3),
+			Tool:        "Edit",
+		}
+		got := correctByContentHash(root, row, lineset.FromRange(3, 5))
+		if !got.IsEmpty() {
+			t.Errorf("expected empty (superseded) for deleted content, got %s", got.String())
 		}
 	})
 

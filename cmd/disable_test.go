@@ -41,11 +41,11 @@ func TestCmdDisable_FullCleanup(t *testing.T) {
 	}
 
 	paths := project.Paths{
-		Root:     tmpDir,
-		GitDir:   filepath.Join(tmpDir, ".git"),
-		LogDir:   logDir,
-		CacheDir: gitBlamebotDir,
-		IndexDB:  filepath.Join(gitBlamebotDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: filepath.Join(gitBlamebotDir, "pending"),
+		CacheDir:   gitBlamebotDir,
+		IndexDB:    filepath.Join(gitBlamebotDir, "index.db"),
 	}
 
 	out := captureStdout(t, func() {
@@ -95,11 +95,11 @@ func TestCmdDisable_PreCommitHookCleaned(t *testing.T) {
 
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
 	paths := project.Paths{
-		Root:     tmpDir,
-		GitDir:   filepath.Join(tmpDir, ".git"),
-		LogDir:   filepath.Join(tmpDir, ".blamebot", "log"),
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: filepath.Join(cacheDir, "pending"),
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 
 	out := captureStdout(t, func() {
@@ -140,11 +140,11 @@ func TestCmdDisable_NotInitialized(t *testing.T) {
 
 	cacheDir := filepath.Join(tmpDir, ".git", "blamebot")
 	paths := project.Paths{
-		Root:     tmpDir,
-		GitDir:   filepath.Join(tmpDir, ".git"),
-		LogDir:   filepath.Join(tmpDir, ".blamebot", "log"),
-		CacheDir: cacheDir,
-		IndexDB:  filepath.Join(cacheDir, "index.db"),
+		Root:       tmpDir,
+		GitDir:     filepath.Join(tmpDir, ".git"),
+		PendingDir: filepath.Join(cacheDir, "pending"),
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
 	}
 
 	out := captureStdout(t, func() {

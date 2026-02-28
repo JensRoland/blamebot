@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"testing"
 )
 
@@ -50,38 +49,6 @@ func TestCleanPrompt(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestRandomString(t *testing.T) {
-	t.Run("returns_correct_length", func(t *testing.T) {
-		for _, n := range []int{0, 1, 6, 20} {
-			got := randomString(n)
-			if len(got) != n {
-				t.Errorf("randomString(%d) length = %d, want %d", n, len(got), n)
-			}
-		}
-	})
-
-	t.Run("contains_only_alphanumeric", func(t *testing.T) {
-		re := regexp.MustCompile(`^[a-z0-9]*$`)
-		for i := 0; i < 100; i++ {
-			got := randomString(10)
-			if !re.MatchString(got) {
-				t.Errorf("randomString(10) = %q, contains non-alphanumeric characters", got)
-			}
-		}
-	})
-
-	t.Run("produces_different_strings", func(t *testing.T) {
-		seen := make(map[string]bool)
-		for i := 0; i < 20; i++ {
-			seen[randomString(10)] = true
-		}
-		// With 36^10 possible strings, 20 calls should produce at least 2 distinct values
-		if len(seen) < 2 {
-			t.Errorf("randomString(10) produced only %d distinct values in 20 calls", len(seen))
-		}
-	})
 }
 
 func TestHandlePromptSubmit(t *testing.T) {
@@ -138,9 +105,6 @@ func TestHandlePromptSubmit(t *testing.T) {
 	}
 	if state.Timestamp == "" {
 		t.Error("Timestamp should not be empty")
-	}
-	if state.SessionFile == "" {
-		t.Error("SessionFile should not be empty")
 	}
 }
 

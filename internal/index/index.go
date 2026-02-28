@@ -74,6 +74,14 @@ func IsStale(paths project.Paths) bool {
 		return true
 	}
 
+	// Check pending edits
+	currentPending := countPendingFiles(paths.PendingDir)
+	var storedPending int
+	db.QueryRow("SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'pending_count'").Scan(&storedPending)
+	if currentPending != storedPending {
+		return true
+	}
+
 	return false
 }
 
@@ -134,17 +142,6 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 	recordCount := 0
 	manifestCount := 0
 
-	manifests, err := provenance.ReadAllManifests(paths.Root)
-	if err != nil {
-		// No manifests yet — return empty index
-		storeHeadSHA(db, paths.Root)
-		storeProvTipSHA(db, paths.Root)
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "\033[2mIndex rebuilt: 0 records from 0 manifests\033[0m\n\n")
-		}
-		return db, nil
-	}
-
 	tx, err := db.Begin()
 	if err != nil {
 		db.Close()
@@ -165,6 +162,8 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 	}
 	defer stmt.Close()
 
+	// Process committed manifests from provenance branch
+	manifests, _ := provenance.ReadAllManifests(paths.Root)
 	for _, m := range manifests {
 		manifestCount++
 		for _, edit := range m.Edits {
@@ -207,16 +206,62 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 				m.Author,
 				edit.Session,
 				edit.Trace,
-				m.ID, // source_file stores manifest ID
+				m.ID,
 				oldStart,
 				oldLines,
 				newStart,
 				newLines,
 				changedLines,
-				m.CommitSHA, // directly from manifest — no git blame needed
+				m.CommitSHA,
 			)
 			recordCount++
 		}
+	}
+
+	// Process pending edits (uncommitted, no commit_sha yet)
+	pendingEdits, _ := provenance.ReadAllPending(paths.GitDir)
+	for _, pe := range pendingEdits {
+		var lineStart, lineEnd *int
+		var changedLines *string
+		if !pe.Lines.IsEmpty() {
+			s := pe.Lines.String()
+			changedLines = &s
+			mn := pe.Lines.Min()
+			mx := pe.Lines.Max()
+			lineStart = &mn
+			lineEnd = &mx
+		}
+
+		var oldStart, oldLines, newStart, newLines *int
+		if pe.Hunk != nil {
+			oldStart = &pe.Hunk.OldStart
+			oldLines = &pe.Hunk.OldLines
+			newStart = &pe.Hunk.NewStart
+			newLines = &pe.Hunk.NewLines
+		}
+
+		stmt.Exec(
+			pe.File,
+			lineStart,
+			lineEnd,
+			pe.ContentHash,
+			pe.Ts,
+			pe.Prompt,
+			"",
+			pe.Change,
+			pe.Tool,
+			pe.Author,
+			pe.Session,
+			pe.Trace,
+			"pending",
+			oldStart,
+			oldLines,
+			newStart,
+			newLines,
+			changedLines,
+			"", // no commit_sha for pending edits
+		)
+		recordCount++
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -226,9 +271,15 @@ func Rebuild(paths project.Paths, quiet bool) (*sql.DB, error) {
 
 	storeHeadSHA(db, paths.Root)
 	storeProvTipSHA(db, paths.Root)
+	storePendingCount(db, countPendingFiles(paths.PendingDir))
 
 	if !quiet {
-		fmt.Fprintf(os.Stderr, "\033[2mIndex rebuilt: %d records from %d manifests\033[0m\n\n", recordCount, manifestCount)
+		msg := fmt.Sprintf("\033[2mIndex rebuilt: %d records from %d manifests", recordCount, manifestCount)
+		if len(pendingEdits) > 0 {
+			msg += fmt.Sprintf(" + %d pending", len(pendingEdits))
+		}
+		msg += "\033[0m\n\n"
+		fmt.Fprint(os.Stderr, msg)
 	}
 
 	return db, nil
@@ -272,4 +323,19 @@ func headSHAChanged(db *sql.DB, root string) bool {
 	}
 	currentSHA := git.HeadSHA(root)
 	return currentSHA != "" && currentSHA != storedSHA
+}
+
+// storePendingCount saves the number of pending edit files for staleness detection.
+func storePendingCount(db *sql.DB, count int) {
+	db.Exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+	db.Exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('pending_count', ?)", count)
+}
+
+// countPendingFiles counts files in the pending edits directory.
+func countPendingFiles(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0
+	}
+	return len(entries)
 }

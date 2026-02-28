@@ -81,81 +81,137 @@ func cmdFile(db *sql.DB, filePath, projectRoot, line string, verbose, jsonOutput
 	}
 }
 
-// queryLineBlame uses git blame to find which records own the queried lines.
-// Returns matches sorted newest first, plus a map of adjustments for all records.
+// queryLineBlame uses git blame combined with forward simulation to find which
+// records own the queried lines. Forward simulation prevents manual changes in
+// the same commit from being attributed to AI edits.
 func queryLineBlame(db *sql.DB, rel, projectRoot, line string) ([]*index.ReasonRow, map[*index.ReasonRow]*format.LineAdjustment) {
 	// Parse the query line (supports "42", "10:20", "10,20")
 	queryStart, queryEnd := parseLineRange(line)
 
-	// Run git blame on the queried range
-	blameEntries, blameErr := git.BlameRange(projectRoot, rel, queryStart, queryEnd)
+	// Get all records for this file (needed for forward simulation context)
+	allRows, err := queryRows(db,
+		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts ASC",
+		rel, "%/"+rel)
+	if err != nil || len(allRows) == 0 {
+		return nil, nil
+	}
 
-	// Collect unique commit SHAs from blame
-	commitSHAs := make(map[string]bool)
-	hasUncommitted := false
+	// Forward simulate all records to get expected AI line positions
+	simulated := linemap.AdjustLinePositions(allRows)
+	simMap := make(map[*index.ReasonRow]*linemap.AdjustedRow)
+	for _, adj := range simulated {
+		simMap[adj.ReasonRow] = adj
+	}
+
+	// Run git blame on the whole file so constrainBySimulation gets full
+	// blame context. Using BlameRange would give only the queried lines,
+	// causing constrainBySimulation's empty-intersection fallback to
+	// incorrectly attribute manual edits to AI records.
+	blameEntries, blameErr := git.BlameFile(projectRoot, rel)
+
+	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
+	var matches []*index.ReasonRow
+
 	if blameErr == nil {
-		for _, entry := range blameEntries {
+		// Only consider SHAs that appear at the queried lines
+		commitSHAs := make(map[string]bool)
+		hasUncommitted := false
+		for lineNum, entry := range blameEntries {
+			if lineNum < queryStart || lineNum > queryEnd {
+				continue
+			}
 			if entry.IsUncommitted() {
 				hasUncommitted = true
 			} else {
 				commitSHAs[entry.SHA] = true
 			}
 		}
-	}
 
-	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
-	var matches []*index.ReasonRow
+		// For each committed SHA, find matching records
+		for sha := range commitSHAs {
+			shaLines := blameLinesForSHA(blameEntries, sha)
 
-	// For committed SHAs: look up records by commit_sha
-	for sha := range commitSHAs {
-		rows, err := queryRows(db,
-			"SELECT * FROM reasons WHERE commit_sha = ? AND (file = ? OR file LIKE ?) ORDER BY ts DESC",
-			sha, rel, "%/"+rel)
-		if err != nil {
-			continue
+			for _, row := range allRows {
+				if row.CommitSHA != sha {
+					continue
+				}
+				sim := simMap[row]
+				if sim != nil && sim.Superseded {
+					continue
+				}
+				currentLines := constrainBySimulation(sim, shaLines)
+				adjMap[row] = &format.LineAdjustment{CurrentLines: currentLines}
+				if currentLines.Overlaps(queryStart, queryEnd) {
+					matches = append(matches, row)
+				}
+			}
 		}
-		shaLines := blameLinesForSHA(blameEntries, sha)
-		if len(rows) == 1 {
-			adjMap[rows[0]] = &format.LineAdjustment{CurrentLines: shaLines}
-			matches = append(matches, rows[0])
-		} else {
-			// Multiple records share this SHA — disambiguate by proximity
-			regions := groupContiguous(shaLines.Lines())
-			for _, row := range rows {
-				mid := recordMidpoint(row)
-				best := nearestRegion(regions, mid)
-				adjMap[row] = &format.LineAdjustment{CurrentLines: lineset.New(best...)}
+
+		// Handle uncommitted lines
+		if hasUncommitted {
+			for _, row := range allRows {
+				if _, already := adjMap[row]; already {
+					continue
+				}
+				if row.CommitSHA != "" {
+					continue
+				}
+				sim := simMap[row]
+				if sim == nil || sim.Superseded {
+					continue
+				}
+				if !sim.CurrentLines.IsEmpty() && sim.CurrentLines.Overlaps(queryStart, queryEnd) {
+					adjMap[row] = &format.LineAdjustment{CurrentLines: sim.CurrentLines}
+					matches = append(matches, row)
+				}
+			}
+		}
+	} else {
+		// Blame failed — use forward simulation for everything
+		for _, row := range allRows {
+			sim := simMap[row]
+			if sim == nil || sim.Superseded {
+				continue
+			}
+			if !sim.CurrentLines.IsEmpty() && sim.CurrentLines.Overlaps(queryStart, queryEnd) {
+				adjMap[row] = &format.LineAdjustment{CurrentLines: sim.CurrentLines}
 				matches = append(matches, row)
 			}
 		}
 	}
 
-	// For uncommitted lines or when blame failed: fall back to forward simulation
-	if hasUncommitted || blameErr != nil {
-		simMatches, simAdj := queryAdjustedLineFallback(db, rel, queryStart, queryEnd)
-		for _, row := range simMatches {
-			if _, already := adjMap[row]; !already {
-				adjMap[row] = simAdj[row]
-				matches = append(matches, row)
-			}
-		}
-	}
-
-	// Sort matches newest first by timestamp
 	sortNewestFirst(matches)
-
 	return matches, adjMap
 }
 
-// blameAdjustFile uses git blame to compute current line positions for all records of a file.
+// blameAdjustFile uses git blame combined with forward simulation to compute
+// current line positions for all records of a file. Forward simulation prevents
+// manual changes in the same commit from being attributed to AI edits.
 func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*index.ReasonRow]*format.LineAdjustment {
 	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
+
+	// Run forward simulation for ALL records to get expected AI line positions
+	sorted := make([]*index.ReasonRow, len(rows))
+	copy(sorted, rows)
+	sortOldestFirst(sorted)
+	simulated := linemap.AdjustLinePositions(sorted)
+
+	simMap := make(map[*index.ReasonRow]*linemap.AdjustedRow)
+	for _, adj := range simulated {
+		simMap[adj.ReasonRow] = adj
+	}
 
 	// Run git blame on the whole file
 	blameEntries, err := git.BlameFile(projectRoot, rel)
 	if err != nil {
-		// Blame failed (untracked file, not a git repo, etc.) — fall back
-		return fallbackAdjustments(rows)
+		// Blame failed — use forward simulation for everything
+		for row, sim := range simMap {
+			adjMap[row] = &format.LineAdjustment{
+				CurrentLines: sim.CurrentLines,
+				Superseded:   sim.Superseded,
+			}
+		}
+		return adjMap
 	}
 
 	// Build reverse map: commit_sha → set of current line numbers
@@ -166,70 +222,55 @@ func blameAdjustFile(projectRoot, rel string, rows []*index.ReasonRow) map[*inde
 		}
 	}
 
-	// Group records by commit_sha
-	shaRecords := make(map[string][]*index.ReasonRow)
-	var uncommittedRows []*index.ReasonRow
 	for _, row := range rows {
-		if row.CommitSHA != "" {
-			shaRecords[row.CommitSHA] = append(shaRecords[row.CommitSHA], row)
-		} else {
-			uncommittedRows = append(uncommittedRows, row)
-		}
-	}
+		sim := simMap[row]
 
-	// Process committed records
-	for sha, records := range shaRecords {
-		lines, ok := shaToLines[sha]
-		if !ok || len(lines) == 0 {
-			// Commit SHA not in current file — content was superseded
-			for _, row := range records {
-				adjMap[row] = &format.LineAdjustment{Superseded: true}
-			}
-			continue
-		}
-
-		if len(records) == 1 {
-			// Single record for this SHA — assign all lines
-			adjMap[records[0]] = &format.LineAdjustment{
-				CurrentLines: lineset.New(lines...),
-			}
-			continue
-		}
-
-		// Multiple records share this SHA — disambiguate by proximity
-		// to each record's original line range
-		regions := groupContiguous(lines)
-		for _, row := range records {
-			mid := recordMidpoint(row)
-			best := nearestRegion(regions, mid)
-			adjMap[row] = &format.LineAdjustment{
-				CurrentLines: lineset.New(best...),
-			}
-		}
-	}
-
-	// Process uncommitted records with forward simulation fallback
-	if len(uncommittedRows) > 0 {
-		allSorted := make([]*index.ReasonRow, len(rows))
-		copy(allSorted, rows)
-		sortOldestFirst(allSorted)
-		adjusted := linemap.AdjustLinePositions(allSorted)
-
-		uncommittedSet := make(map[*index.ReasonRow]bool)
-		for _, row := range uncommittedRows {
-			uncommittedSet[row] = true
-		}
-		for _, adj := range adjusted {
-			if uncommittedSet[adj.ReasonRow] {
-				adjMap[adj.ReasonRow] = &format.LineAdjustment{
-					CurrentLines: adj.CurrentLines,
-					Superseded:   adj.Superseded,
+		if row.CommitSHA == "" {
+			// Uncommitted: use forward simulation
+			if sim != nil {
+				adjMap[row] = &format.LineAdjustment{
+					CurrentLines: sim.CurrentLines,
+					Superseded:   sim.Superseded,
 				}
 			}
+			continue
+		}
+
+		blameLines, ok := shaToLines[row.CommitSHA]
+		if !ok || len(blameLines) == 0 {
+			adjMap[row] = &format.LineAdjustment{Superseded: true}
+			continue
+		}
+
+		// Intersect forward-simulated positions with blame lines to exclude
+		// non-AI changes (e.g., manual edits) in the same commit
+		adjMap[row] = &format.LineAdjustment{
+			CurrentLines: constrainBySimulation(sim, lineset.New(blameLines...)),
 		}
 	}
 
 	return adjMap
+}
+
+// constrainBySimulation narrows blame lines to only those predicted by forward
+// simulation. This prevents manual changes in the same commit from being
+// attributed to AI edits. Falls back to full blame lines if simulation
+// disagrees entirely (likely due to untracked shifts between commits).
+func constrainBySimulation(sim *linemap.AdjustedRow, blameLines lineset.LineSet) lineset.LineSet {
+	if sim == nil || sim.Superseded || sim.CurrentLines.IsEmpty() {
+		return blameLines
+	}
+	var intersection []int
+	for _, l := range sim.CurrentLines.Lines() {
+		if blameLines.Contains(l) {
+			intersection = append(intersection, l)
+		}
+	}
+	if len(intersection) > 0 {
+		return lineset.New(intersection...)
+	}
+	// Intersection empty — forward sim likely wrong due to untracked shifts
+	return blameLines
 }
 
 // groupContiguous groups sorted line numbers into contiguous regions.
@@ -286,73 +327,6 @@ func regionCenter(region []int) float64 {
 		return 0
 	}
 	return float64(region[0]+region[len(region)-1]) / 2
-}
-
-// fallbackAdjustments uses forward simulation for line adjustment when blame is unavailable.
-func fallbackAdjustments(rows []*index.ReasonRow) map[*index.ReasonRow]*format.LineAdjustment {
-	// Need oldest-first for forward simulation
-	sorted := make([]*index.ReasonRow, len(rows))
-	copy(sorted, rows)
-	sortOldestFirst(sorted)
-
-	adjusted := linemap.AdjustLinePositions(sorted)
-	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
-	for _, adj := range adjusted {
-		adjMap[adj.ReasonRow] = &format.LineAdjustment{
-			CurrentLines: adj.CurrentLines,
-			Superseded:   adj.Superseded,
-		}
-	}
-	return adjMap
-}
-
-// queryAdjustedLineFallback uses forward simulation for uncommitted content.
-func queryAdjustedLineFallback(db *sql.DB, rel string, queryStart, queryEnd int) ([]*index.ReasonRow, map[*index.ReasonRow]*format.LineAdjustment) {
-	allRows, err := queryRows(db,
-		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts ASC",
-		rel, "%/"+rel)
-	if err != nil || len(allRows) == 0 {
-		return nil, nil
-	}
-
-	adjusted := linemap.AdjustLinePositions(allRows)
-
-	var matches []*index.ReasonRow
-	adjMap := make(map[*index.ReasonRow]*format.LineAdjustment)
-
-	for _, adj := range adjusted {
-		// Only include records without commit_sha (uncommitted)
-		if adj.CommitSHA != "" {
-			continue
-		}
-
-		la := &format.LineAdjustment{
-			CurrentLines: adj.CurrentLines,
-			Superseded:   adj.Superseded,
-		}
-		adjMap[adj.ReasonRow] = la
-
-		if adj.Superseded {
-			continue
-		}
-
-		if !adj.CurrentLines.IsEmpty() {
-			if adj.CurrentLines.Overlaps(queryStart, queryEnd) {
-				matches = append(matches, adj.ReasonRow)
-			}
-		} else if adj.LineStart != nil {
-			ls := *adj.LineStart
-			le := ls
-			if adj.LineEnd != nil {
-				le = *adj.LineEnd
-			}
-			if ls <= queryEnd && le >= queryStart {
-				matches = append(matches, adj.ReasonRow)
-			}
-		}
-	}
-
-	return matches, adjMap
 }
 
 // blameLinesForSHA extracts the set of line numbers attributed to a given SHA.

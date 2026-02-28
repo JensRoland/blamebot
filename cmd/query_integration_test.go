@@ -2,7 +2,7 @@ package cmd
 
 import (
 	"database/sql"
-	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -10,555 +10,583 @@ import (
 	"testing"
 
 	"github.com/jensroland/git-blamebot/internal/index"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 	"github.com/jensroland/git-blamebot/internal/project"
+	"github.com/jensroland/git-blamebot/internal/provenance"
+	"github.com/jensroland/git-blamebot/internal/record"
 )
 
-// setupGitRepoWithIndex creates a real git repo with committed source files,
-// committed JSONL log files, and a built SQLite index.
-//
-// The source file and JSONL records are committed together in a single commit
-// so that git blame on src/main.go returns the same SHA that git blame on the
-// JSONL file returns. This mirrors the real workflow where blamebot records are
-// committed alongside the code changes they describe.
-func setupGitRepoWithIndex(t *testing.T) (*sql.DB, string) {
+// ── test helpers ──────────────────────────────────────────────────────────────
+
+func initQueryTestRepo(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
+	runGitCmd(t, dir, "init")
+	runGitCmd(t, dir, "config", "user.name", "Test")
+	runGitCmd(t, dir, "config", "user.email", "test@test.com")
+	runGitCmd(t, dir, "commit", "--allow-empty", "-m", "init")
+	if err := provenance.InitBranch(dir); err != nil {
+		t.Fatalf("InitBranch: %v", err)
+	}
+	return dir
+}
 
-	// Initialize git repo
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=Test",
-			"GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=Test",
-			"GIT_COMMITTER_EMAIL=test@test.com",
-		)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+func runGitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
+func gitHeadSHA(t *testing.T, dir string) string {
+	t.Helper()
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func writeTestFileAt(t *testing.T, dir, name, content string) {
+	t.Helper()
+	p := filepath.Join(dir, name)
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func makeTestPaths(root string) project.Paths {
+	cacheDir := filepath.Join(root, ".git", "blamebot")
+	os.MkdirAll(cacheDir, 0o755)
+	return project.Paths{
+		Root:       root,
+		GitDir:     filepath.Join(root, ".git"),
+		PendingDir: filepath.Join(cacheDir, "pending"),
+		CacheDir:   cacheDir,
+		IndexDB:    filepath.Join(cacheDir, "index.db"),
+	}
+}
+
+// generateLines generates "line N\n" for each N in [from, to].
+func generateLines(from, to int) string {
+	var b strings.Builder
+	for i := from; i <= to; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	return b.String()
+}
+
+// buildModifiedFile builds a file where lines in [modFrom, modTo] are
+// replaced with "changed N\n" and all other lines are "line N\n".
+func buildModifiedFile(totalLines, modFrom, modTo int) string {
+	var b strings.Builder
+	for i := 1; i <= totalLines; i++ {
+		if i >= modFrom && i <= modTo {
+			fmt.Fprintf(&b, "changed %d\n", i)
+		} else {
+			fmt.Fprintf(&b, "line %d\n", i)
 		}
 	}
+	return b.String()
+}
 
-	run("init")
-	run("config", "user.email", "test@test.com")
-	run("config", "user.name", "Test")
-
-	// Create source file
-	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "src/main.go"), []byte("line1\nline2\nline3\nline4\nline5\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Create JSONL log directory structure
-	if err := os.MkdirAll(filepath.Join(dir, ".blamebot", "log"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".git", "blamebot"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write JSONL records (commit_sha is ignored by index.Rebuild; it uses
-	// git blame on the JSONL file to derive the real commit_sha).
-	jsonl := `{"file":"src/main.go","lines":"2-4","ts":"2025-01-01T00:00:00Z","change":"modified lines","prompt":"fix bug","tool":"Edit","content_hash":"abc"}
-{"file":"src/main.go","lines":"1","ts":"2025-01-02T00:00:00Z","change":"updated header","prompt":"add header","tool":"Edit","content_hash":"def"}
-`
-
-	if err := os.WriteFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"), []byte(jsonl), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Commit the source file and JSONL records together so git blame on
-	// src/main.go returns the same SHA as git blame on the JSONL file.
-	run("add", "src/main.go", ".blamebot/log/session.jsonl")
-	run("commit", "-m", "initial commit with source and blamebot logs")
-
-	paths := project.Paths{
-		Root:     dir,
-		LogDir:   filepath.Join(dir, ".blamebot", "log"),
-		CacheDir: filepath.Join(dir, ".git", "blamebot"),
-		IndexDB:  filepath.Join(dir, ".git", "blamebot", "index.db"),
-	}
-
+func rebuildTestIndex(t *testing.T, paths project.Paths) *sql.DB {
+	t.Helper()
 	db, err := index.Rebuild(paths, true)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("index.Rebuild: %v", err)
 	}
-
-	return db, dir
+	return db
 }
 
-// ---------- blameAdjustFile tests ----------
-
-func TestBlameAdjustFile(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	defer db.Close()
-
-	// Query all rows for src/main.go
+func queryFileRows(t *testing.T, db *sql.DB, file string) []*index.ReasonRow {
+	t.Helper()
 	rows, err := queryRows(db,
-		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts DESC",
-		"src/main.go", "%/src/main.go")
+		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts ASC",
+		file, "%/"+file)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("queryRows: %v", err)
 	}
-	if len(rows) == 0 {
-		t.Fatal("expected rows for src/main.go, got none")
-	}
-
-	adjMap := blameAdjustFile(dir, "src/main.go", rows)
-
-	for i, row := range rows {
-		adj, ok := adjMap[row]
-		if !ok || adj == nil {
-			t.Errorf("row %d: expected non-nil LineAdjustment, got nil", i)
-			continue
-		}
-		if adj.CurrentLines.IsEmpty() {
-			t.Errorf("row %d (lines=%v): expected non-empty CurrentLines", i, row.LineStart)
-		}
-	}
+	return rows
 }
 
-// ---------- queryLineBlame tests ----------
+// ── Bug #1: Pending (uncommitted) edits visible in queries ────────────────────
 
-func TestQueryLineBlame(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	defer db.Close()
+// TestQueryLineBlame_PendingEditVisible verifies that uncommitted AI edits
+// (stored as pending edits) are found by line-level queries.
+//
+// Reproduces Bug #1: "git blamebot -L 3 README.md" returned "No reasons found"
+// when there was an uncommitted pending AI edit for that line.
+func TestQueryLineBlame_PendingEditVisible(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
 
-	matches, adjustments := queryLineBlame(db, "src/main.go", dir, "2")
-	if len(matches) == 0 {
-		t.Fatal("expected matches for line 2, got none")
-	}
+	// 1. Create file with 20 lines, commit
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial file")
 
-	for _, m := range matches {
-		adj, ok := adjustments[m]
-		if !ok {
-			t.Errorf("match for file=%s has no adjustment entry", m.File)
-		}
-		if adj == nil {
-			t.Errorf("match for file=%s has nil adjustment", m.File)
-		}
-	}
-}
+	// 2. AI modifies lines 3-5 (don't commit — simulates uncommitted state)
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 5))
 
-func TestQueryLineBlame_Range(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	defer db.Close()
-
-	matches, adjustments := queryLineBlame(db, "src/main.go", dir, "1:3")
-	if len(matches) == 0 {
-		t.Fatal("expected matches for line range 1:3, got none")
-	}
-
-	// Should find at least one record since lines 1, 2-4 are covered
-	for _, m := range matches {
-		if _, ok := adjustments[m]; !ok {
-			t.Errorf("match for file=%s missing from adjustments map", m.File)
-		}
-	}
-}
-
-// ---------- queryAdjustedLineFallback tests ----------
-
-func TestQueryAdjustedLineFallback(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	// Close and rebuild with an uncommitted record
-	db.Close()
-
-	// Modify the source file without committing
-	if err := os.WriteFile(filepath.Join(dir, "src/main.go"), []byte("new1\nline1\nline2\nline3\nline4\nline5\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a new JSONL record without commit_sha (simulates uncommitted edit)
-	existingData, err := os.ReadFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	uncommittedRecord := `{"file":"src/main.go","lines":"1","ts":"2025-01-03T00:00:00Z","change":"added new line","prompt":"insert header","tool":"Edit","content_hash":"ghi","commit_sha":""}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"), append(existingData, []byte(uncommittedRecord)...), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Rebuild the index with the new record
-	paths := project.Paths{
-		Root:     dir,
-		LogDir:   filepath.Join(dir, ".blamebot", "log"),
-		CacheDir: filepath.Join(dir, ".git", "blamebot"),
-		IndexDB:  filepath.Join(dir, ".git", "blamebot", "index.db"),
-	}
-	db2, err := index.Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db2.Close()
-
-	// Call the fallback function for lines 1-3
-	matches, adjMap := queryAdjustedLineFallback(db2, "src/main.go", 1, 3)
-
-	// The function should return without error. Matches may or may not be found
-	// depending on the forward simulation, but the function itself should not panic.
-	_ = matches
-	_ = adjMap
-}
-
-// ---------- cmdFile with line filter tests ----------
-
-func TestCmdFile_WithLine(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	defer db.Close()
-
-	out := captureStdout(t, func() {
-		cmdFile(db, "src/main.go", dir, "2", false, false)
+	// 3. Create pending edit recording AI's change
+	ls, _ := lineset.FromString("3-5")
+	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+		ID:     "pending-1",
+		Ts:     "2025-01-01T00:01:00Z",
+		File:   "README.md",
+		Lines:  ls,
+		Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+		Change: "AI modified lines 3-5",
+		Tool:   "Edit",
+		Author: "claude",
 	})
 
-	// Should output record information (not "No reasons found")
-	if strings.Contains(out, "No reasons found") {
-		t.Errorf("expected record info for line 2, got: %s", out)
-	}
-	if out == "" {
-		t.Error("expected non-empty output for line 2 query")
-	}
-}
-
-func TestCmdFile_WithLine_JSON(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
+	// 4. Rebuild index
+	db := rebuildTestIndex(t, paths)
 	defer db.Close()
 
-	out := captureStdout(t, func() {
-		cmdFile(db, "src/main.go", dir, "2", false, true)
-	})
-
-	out = strings.TrimSpace(out)
-	if out == "" {
-		t.Fatal("expected JSON output, got empty string")
+	// 5. Query line 3 — MUST find the pending edit
+	matches, adjMap := queryLineBlame(db, "README.md", root, "3")
+	if len(matches) == 0 {
+		t.Fatal("Bug #1: queryLineBlame returned no matches for line 3, but a pending AI edit exists")
 	}
 
-	// Verify the output is valid JSON
-	var result []interface{}
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out)
+	found := false
+	for _, m := range matches {
+		if m.CommitSHA == "" && m.Change == "AI modified lines 3-5" {
+			found = true
+			adj := adjMap[m]
+			if adj == nil {
+				t.Error("pending edit match has no line adjustment")
+				break
+			}
+			if !adj.CurrentLines.Contains(3) || !adj.CurrentLines.Contains(5) {
+				t.Errorf("pending edit currentLines = %v, want to contain 3-5",
+					adj.CurrentLines.String())
+			}
+			break
+		}
 	}
-	if len(result) == 0 {
-		t.Error("expected at least one JSON result for line 2")
+	if !found {
+		t.Error("Bug #1: pending edit not found in queryLineBlame matches")
 	}
 }
 
-// ---------- blameAdjustFile with uncommitted records ----------
+// TestBlameAdjustFile_PendingEditVisible verifies that pending edits appear
+// in file-level queries (no line filter).
+//
+// Reproduces Bug #1: "git blamebot README.md" only showed old committed records
+// and omitted the pending (uncommitted) AI edit.
+func TestBlameAdjustFile_PendingEditVisible(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
 
-func TestBlameAdjustFile_Uncommitted(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	db.Close()
+	// 1. Create file, commit
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial file")
+	initialSHA := gitHeadSHA(t, root)
 
-	// Modify the source file without committing (add a line at the top)
-	if err := os.WriteFile(filepath.Join(dir, "src/main.go"), []byte("new_header\nline1\nline2\nline3\nline4\nline5\n"), 0o644); err != nil {
-		t.Fatal(err)
+	// 2. Write a manifest for an earlier committed AI edit (lines 1-2)
+	ls1, _ := lineset.FromString("1-2")
+	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+		ID:        "m1",
+		CommitSHA: initialSHA,
+		Author:    "claude",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "README.md",
+				Lines:  ls1,
+				Change: "AI wrote lines 1-2",
+				Tool:   "Edit",
+				Hunk:   &record.HunkInfo{OldStart: 1, OldLines: 0, NewStart: 1, NewLines: 2},
+			},
+		},
+	})
+
+	// 3. AI modifies lines 3-5 (don't commit)
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 5))
+
+	// 4. Create pending edit
+	ls2, _ := lineset.FromString("3-5")
+	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+		ID:     "pending-1",
+		Ts:     "2025-01-01T00:01:00Z",
+		File:   "README.md",
+		Lines:  ls2,
+		Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+		Change: "AI modified lines 3-5",
+		Tool:   "Edit",
+		Author: "claude",
+	})
+
+	// 5. Rebuild index
+	db := rebuildTestIndex(t, paths)
+	defer db.Close()
+
+	// 6. Query all file rows — MUST include both committed and pending records
+	rows := queryFileRows(t, db, "README.md")
+	if len(rows) < 2 {
+		t.Fatalf("Bug #1: expected at least 2 rows (committed + pending), got %d", len(rows))
 	}
 
-	// Write a new uncommitted JSONL record (empty commit_sha)
-	existingData, err := os.ReadFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	uncommittedRecord := `{"file":"src/main.go","lines":"1","ts":"2025-01-03T00:00:00Z","change":"added header line","prompt":"add header","tool":"Edit","content_hash":"uncommitted1","commit_sha":""}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"), append(existingData, []byte(uncommittedRecord)...), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	adjMap := blameAdjustFile(root, "README.md", rows)
 
-	// Rebuild the index
-	paths := project.Paths{
-		Root:     dir,
-		LogDir:   filepath.Join(dir, ".blamebot", "log"),
-		CacheDir: filepath.Join(dir, ".git", "blamebot"),
-		IndexDB:  filepath.Join(dir, ".git", "blamebot", "index.db"),
-	}
-	db2, err := index.Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db2.Close()
-
-	// Query all rows for the file
-	rows, err := queryRows(db2,
-		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts DESC",
-		"src/main.go", "%/src/main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) == 0 {
-		t.Fatal("expected rows for src/main.go, got none")
-	}
-
-	// Call blameAdjustFile — this exercises the uncommittedRows > 0 branch
-	adjMap := blameAdjustFile(dir, "src/main.go", rows)
-
-	// Verify that every row got some adjustment entry
-	for i, row := range rows {
-		adj, ok := adjMap[row]
-		if !ok || adj == nil {
-			t.Errorf("row %d (commit_sha=%q): expected non-nil LineAdjustment, got nil", i, row.CommitSHA)
-		}
-	}
-
-	// The uncommitted record (empty commit_sha) should have been processed via fallback
-	var foundUncommitted bool
+	foundPending := false
 	for _, row := range rows {
-		if row.CommitSHA == "" {
-			foundUncommitted = true
+		if row.CommitSHA == "" && row.Change == "AI modified lines 3-5" {
+			foundPending = true
 			adj := adjMap[row]
 			if adj == nil {
-				t.Error("uncommitted record should have an adjustment entry")
+				t.Error("Bug #1: pending edit has no line adjustment")
+			} else if adj.CurrentLines.IsEmpty() {
+				t.Error("Bug #1: pending edit has empty currentLines")
 			}
+			break
 		}
 	}
-	if !foundUncommitted {
-		t.Error("expected at least one uncommitted record (empty commit_sha)")
+	if !foundPending {
+		t.Error("Bug #1: pending edit not found in file query results")
 	}
 }
 
-// ---------- blameAdjustFile with superseded SHA ----------
+// ── Bug #2: AI and manual changes separated in same commit ────────────────────
 
-func TestBlameAdjustFile_SupersededSHA(t *testing.T) {
-	dir := t.TempDir()
+// TestBlameAdjustFile_SeparatesAIAndManual verifies that when AI edits
+// lines 3-5 and manual edits touch lines 6-16 in the same commit,
+// the AI record shows only L3-5 (not L3-16).
+//
+// Reproduces Bug #2: blamebot showed "L3-16" for an AI edit that only
+// touched lines 3-5, because manual changes in the same commit were lumped in.
+func TestBlameAdjustFile_SeparatesAIAndManual(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
 
-	// Initialize git repo
-	run := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=Test",
-			"GIT_AUTHOR_EMAIL=test@test.com",
-			"GIT_COMMITTER_NAME=Test",
-			"GIT_COMMITTER_EMAIL=test@test.com",
-		)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
-	}
+	// 1. Create file with 20 lines, commit
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial")
 
-	run("init")
-	run("config", "user.email", "test@test.com")
-	run("config", "user.name", "Test")
+	// 2. Change lines 3-16 in a single commit (AI: 3-5, manual: 6-16)
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 16))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "mixed AI and manual changes")
+	commitSHA := gitHeadSHA(t, root)
 
-	// Create source file and JSONL, commit together (C1)
-	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "src/main.go"), []byte("line1\nline2\nline3\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".blamebot", "log"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(dir, ".git", "blamebot"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	jsonl := `{"file":"src/main.go","lines":"1-3","ts":"2025-01-01T00:00:00Z","change":"initial content","prompt":"create file","tool":"Write","content_hash":"abc"}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"), []byte(jsonl), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", "src/main.go", ".blamebot/log/session.jsonl")
-	run("commit", "-m", "initial commit with source and logs")
-
-	// Now completely rewrite the file (all lines replaced) and commit (C2)
-	if err := os.WriteFile(filepath.Join(dir, "src/main.go"), []byte("totally_new1\ntotally_new2\ntotally_new3\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("add", "src/main.go")
-	run("commit", "-m", "completely rewrite file")
-
-	// Rebuild index
-	paths := project.Paths{
-		Root:     dir,
-		LogDir:   filepath.Join(dir, ".blamebot", "log"),
-		CacheDir: filepath.Join(dir, ".git", "blamebot"),
-		IndexDB:  filepath.Join(dir, ".git", "blamebot", "index.db"),
-	}
-	db, err := index.Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	// Query all rows
-	rows, err := queryRows(db,
-		"SELECT * FROM reasons WHERE (file = ? OR file LIKE ?) ORDER BY ts DESC",
-		"src/main.go", "%/src/main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) == 0 {
-		t.Fatal("expected rows for src/main.go")
-	}
-
-	// Call blameAdjustFile — the record's commit_sha (C1) won't appear in
-	// blame anymore because all lines were rewritten in C2
-	adjMap := blameAdjustFile(dir, "src/main.go", rows)
-
-	// The record should be marked as superseded
-	for _, row := range rows {
-		adj, ok := adjMap[row]
-		if !ok || adj == nil {
-			t.Errorf("expected adjustment for row with commit_sha=%q", row.CommitSHA)
-			continue
-		}
-		if !adj.Superseded {
-			t.Errorf("expected Superseded=true for row with commit_sha=%q (content was fully replaced)", row.CommitSHA)
-		}
-	}
-}
-
-// ---------- queryAdjustedLineFallback with matching lines ----------
-
-func TestQueryAdjustedLineFallback_Match(t *testing.T) {
-	db, dir := setupGitRepoWithIndex(t)
-	db.Close()
-
-	// Add an uncommitted record to the JSONL without commit_sha
-	existingData, err := os.ReadFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	uncommittedRecord := `{"file":"src/main.go","lines":"3-4","ts":"2025-01-03T00:00:00Z","change":"modified middle","prompt":"update logic","tool":"Edit","content_hash":"uncommitted2","commit_sha":""}` + "\n"
-	if err := os.WriteFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"), append(existingData, []byte(uncommittedRecord)...), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	// Rebuild the index
-	paths := project.Paths{
-		Root:     dir,
-		LogDir:   filepath.Join(dir, ".blamebot", "log"),
-		CacheDir: filepath.Join(dir, ".git", "blamebot"),
-		IndexDB:  filepath.Join(dir, ".git", "blamebot", "index.db"),
-	}
-	db2, err := index.Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db2.Close()
-
-	// Call queryAdjustedLineFallback with a line range that overlaps the uncommitted record (lines 3-4)
-	matches, adjMap := queryAdjustedLineFallback(db2, "src/main.go", 3, 4)
-
-	// Should find at least one uncommitted match
-	if len(matches) == 0 {
-		t.Error("expected at least one match from queryAdjustedLineFallback for lines 3-4")
-	}
-
-	// Verify all matches have adjustment entries
-	for _, m := range matches {
-		if _, ok := adjMap[m]; !ok {
-			t.Errorf("match for file=%s missing from adjMap", m.File)
-		}
-	}
-
-	// Verify only uncommitted records are returned (commit_sha == "")
-	for _, m := range matches {
-		if m.CommitSHA != "" {
-			t.Errorf("expected only uncommitted records (empty commit_sha), got commit_sha=%q", m.CommitSHA)
-		}
-	}
-}
-
-func TestQueryAdjustedLineFallback_NoRows(t *testing.T) {
-	db, _ := setupGitRepoWithIndex(t)
-	defer db.Close()
-
-	// Query a file that doesn't exist in the DB
-	matches, adjMap := queryAdjustedLineFallback(db, "nonexistent.go", 1, 5)
-	if len(matches) != 0 {
-		t.Errorf("expected no matches for nonexistent file, got %d", len(matches))
-	}
-	if adjMap != nil {
-		t.Errorf("expected nil adjMap for nonexistent file, got %v", adjMap)
-	}
-}
-
-func TestQueryAdjustedLineFallback_LineStartFallback(t *testing.T) {
-	// This tests the path where CurrentLines is empty but LineStart/LineEnd
-	// overlap the query range (lines 351-359 of query.go)
-	db, dir := setupGitRepoWithIndex(t)
-	db.Close()
-
-	// Write a record with only line numbers (no changed_lines), no commit SHA
-	// and no hunk data, so forward simulation can't compute CurrentLines
-	existingData, _ := os.ReadFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"))
-	noHunkRecord := `{"file":"src/main.go","lines":"3","ts":"2025-01-04T00:00:00Z","change":"small fix","prompt":"fix","tool":"Edit","commit_sha":""}` + "\n"
-	_ = os.WriteFile(filepath.Join(dir, ".blamebot", "log", "session.jsonl"), append(existingData, []byte(noHunkRecord)...), 0o644)
-
-	paths := project.Paths{
-		Root:     dir,
-		LogDir:   filepath.Join(dir, ".blamebot", "log"),
-		CacheDir: filepath.Join(dir, ".git", "blamebot"),
-		IndexDB:  filepath.Join(dir, ".git", "blamebot", "index.db"),
-	}
-	db2, err := index.Rebuild(paths, true)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db2.Close()
-
-	// Query a range that overlaps line 3
-	matches, _ := queryAdjustedLineFallback(db2, "src/main.go", 2, 4)
-	// The function should run without errors regardless of whether matches are found
-	_ = matches
-}
-
-// ---------- printAdjustedJSON tests ----------
-
-func TestPrintAdjustedJSON(t *testing.T) {
-	// Create a simple ReasonRow
-	lineStart := 5
-	lineEnd := 10
-	row := &index.ReasonRow{
-		ID:          1,
-		File:        "src/example.go",
-		LineStart:   &lineStart,
-		LineEnd:     &lineEnd,
-		ContentHash: "testhash",
-		Ts:          "2025-01-01T00:00:00Z",
-		Prompt:      "test prompt",
-		Reason:      "test reason",
-		Change:      "test change",
-		Tool:        "Edit",
-		Author:      "testuser",
-		Session:     "sess-123",
-		Trace:       "",
-		SourceFile:  "session.jsonl",
-	}
-
-	out := captureStdout(t, func() {
-		printAdjustedJSON([]*index.ReasonRow{row}, nil, "/tmp/fake-root")
+	// 3. Write manifest recording ONLY the AI edit (lines 3-5)
+	ls, _ := lineset.FromString("3-5")
+	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+		ID:        "m1",
+		CommitSHA: commitSHA,
+		Author:    "claude",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "README.md",
+				Lines:  ls,
+				Change: "AI modified lines 3-5",
+				Tool:   "Edit",
+				Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+			},
+		},
 	})
 
-	out = strings.TrimSpace(out)
-	if out == "" {
-		t.Fatal("expected JSON output, got empty string")
+	// 4. Rebuild index
+	db := rebuildTestIndex(t, paths)
+	defer db.Close()
+
+	// 5. Get rows and run blameAdjustFile
+	rows := queryFileRows(t, db, "README.md")
+	if len(rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(rows))
 	}
 
-	// Verify the output is valid JSON
-	var result []interface{}
-	if err := json.Unmarshal([]byte(out), &result); err != nil {
-		t.Fatalf("output is not valid JSON: %v\noutput: %s", err, out)
+	adjMap := blameAdjustFile(root, "README.md", rows)
+	adj := adjMap[rows[0]]
+	if adj == nil {
+		t.Fatal("no line adjustment for AI record")
 	}
-	if len(result) != 1 {
-		t.Errorf("expected exactly 1 JSON result, got %d", len(result))
+	if adj.Superseded {
+		t.Fatal("AI record should not be superseded")
 	}
 
-	// Check that the JSON contains expected fields
-	item, ok := result[0].(map[string]interface{})
-	if !ok {
-		t.Fatal("expected JSON object as first element")
+	// 6. Verify: AI record shows ONLY L3-5
+	currentLines := adj.CurrentLines.Lines()
+	if len(currentLines) != 3 {
+		t.Errorf("Bug #2: currentLines = %v (len %d), want [3,4,5]",
+			currentLines, len(currentLines))
 	}
-	if item["file"] != "src/example.go" {
-		t.Errorf("expected file=src/example.go, got %v", item["file"])
+	for _, expected := range []int{3, 4, 5} {
+		if !adj.CurrentLines.Contains(expected) {
+			t.Errorf("Bug #2: AI line %d missing from currentLines %v",
+				expected, currentLines)
+		}
 	}
-	if item["prompt"] != "test prompt" {
-		t.Errorf("expected prompt=test prompt, got %v", item["prompt"])
+
+	// 7. Verify: manual lines 6-16 are NOT attributed to AI
+	for line := 6; line <= 16; line++ {
+		if adj.CurrentLines.Contains(line) {
+			t.Errorf("Bug #2: manual line %d incorrectly attributed to AI "+
+				"(currentLines=%v)", line, currentLines)
+		}
+	}
+}
+
+// TestQueryLineBlame_AILineReturnsMatch verifies that querying an AI-edited
+// line returns a match when AI and manual edits are in the same commit.
+func TestQueryLineBlame_AILineReturnsMatch(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
+
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial")
+
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 16))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "mixed changes")
+	commitSHA := gitHeadSHA(t, root)
+
+	ls, _ := lineset.FromString("3-5")
+	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+		ID:        "m1",
+		CommitSHA: commitSHA,
+		Author:    "claude",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "README.md",
+				Lines:  ls,
+				Change: "AI modified lines 3-5",
+				Tool:   "Edit",
+				Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+			},
+		},
+	})
+
+	db := rebuildTestIndex(t, paths)
+	defer db.Close()
+
+	// Query line 3 — should find the AI edit
+	matches, adjMap := queryLineBlame(db, "README.md", root, "3")
+	if len(matches) == 0 {
+		t.Fatal("queryLineBlame for AI line 3 returned no matches")
+	}
+
+	adj := adjMap[matches[0]]
+	if adj == nil {
+		t.Fatal("match has no line adjustment")
+	}
+	for _, expected := range []int{3, 4, 5} {
+		if !adj.CurrentLines.Contains(expected) {
+			t.Errorf("AI line %d missing from currentLines %v",
+				expected, adj.CurrentLines.Lines())
+		}
+	}
+}
+
+// TestQueryLineBlame_ManualLineNoMatch verifies that querying a manually-edited
+// line does NOT return an AI match when AI and manual edits share a commit.
+func TestQueryLineBlame_ManualLineNoMatch(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
+
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "initial")
+
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 16))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "mixed changes")
+	commitSHA := gitHeadSHA(t, root)
+
+	ls, _ := lineset.FromString("3-5")
+	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+		ID:        "m1",
+		CommitSHA: commitSHA,
+		Author:    "claude",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "README.md",
+				Lines:  ls,
+				Change: "AI modified lines 3-5",
+				Tool:   "Edit",
+				Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+			},
+		},
+	})
+
+	db := rebuildTestIndex(t, paths)
+	defer db.Close()
+
+	// Query line 10 — a manually edited line, should NOT match any AI record
+	matches, _ := queryLineBlame(db, "README.md", root, "10")
+	if len(matches) > 0 {
+		t.Errorf("Bug #2: queryLineBlame for manual line 10 returned %d matches, want 0",
+			len(matches))
+		for _, m := range matches {
+			t.Logf("  unexpected match: change=%q commitSHA=%q", m.Change, m.CommitSHA)
+		}
+	}
+}
+
+// ── Full scenario: exact reproduction of the user's bug report ────────────────
+
+// TestQueryIntegration_FullScenario reproduces the user's exact bug sequence:
+//
+//  1. AI creates file → commit 1
+//  2. AI edits lines 3-5 (uncommitted)
+//  3. User manually edits lines 6-16 (uncommitted)
+//  4. Query line 3 → should find pending AI edit (Bug #1)
+//  5. Query all file → should include pending edit (Bug #1)
+//  6. Commit (AI + manual changes go into commit 2)
+//  7. Query all file → AI record shows L3-5, NOT L3-16 (Bug #2)
+func TestQueryIntegration_FullScenario(t *testing.T) {
+	root := initQueryTestRepo(t)
+	paths := makeTestPaths(root)
+
+	// ── Step 1: AI creates the initial file and commits ──
+	writeTestFileAt(t, root, "README.md", generateLines(1, 20))
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "AI creates file")
+	commit1SHA := gitHeadSHA(t, root)
+
+	ls1, _ := lineset.FromString("1-20")
+	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+		ID:        "m1",
+		CommitSHA: commit1SHA,
+		Author:    "claude",
+		Timestamp: "2025-01-01T00:00:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "README.md",
+				Lines:  ls1,
+				Change: "AI created file with 20 lines",
+				Tool:   "Write",
+				Hunk:   &record.HunkInfo{OldStart: 1, OldLines: 0, NewStart: 1, NewLines: 20},
+			},
+		},
+	})
+
+	// ── Steps 2-3: AI edits lines 3-5, user manually edits 6-16 (uncommitted) ──
+	writeTestFileAt(t, root, "README.md", buildModifiedFile(20, 3, 16))
+
+	ls2, _ := lineset.FromString("3-5")
+	provenance.WritePending(paths.GitDir, provenance.PendingEdit{
+		ID:     "pending-1",
+		Ts:     "2025-01-01T00:01:00Z",
+		File:   "README.md",
+		Lines:  ls2,
+		Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+		Change: "AI modified lines 3-5",
+		Tool:   "Edit",
+		Author: "claude",
+	})
+
+	// ── Step 4: Query line 3 → should find pending AI edit (Bug #1) ──
+	db := rebuildTestIndex(t, paths)
+
+	matches, _ := queryLineBlame(db, "README.md", root, "3")
+	if len(matches) == 0 {
+		t.Fatal("Step 4 FAILED (Bug #1): query for line 3 returned no matches, " +
+			"but pending AI edit exists for lines 3-5")
+	}
+	foundPending := false
+	for _, m := range matches {
+		if m.CommitSHA == "" && m.Change == "AI modified lines 3-5" {
+			foundPending = true
+		}
+	}
+	if !foundPending {
+		t.Error("Step 4 FAILED (Bug #1): pending edit not found in line query matches")
+	}
+
+	// ── Step 5: Query all file → should include pending edit (Bug #1) ──
+	allRows := queryFileRows(t, db, "README.md")
+	hasPendingRow := false
+	for _, row := range allRows {
+		if row.CommitSHA == "" && row.Change == "AI modified lines 3-5" {
+			hasPendingRow = true
+		}
+	}
+	if !hasPendingRow {
+		t.Error("Step 5 FAILED (Bug #1): pending edit not found in file query results")
+	}
+
+	db.Close()
+
+	// ── Step 6: Commit everything ──
+	runGitCmd(t, root, "add", "README.md")
+	runGitCmd(t, root, "commit", "-m", "AI + manual changes")
+	commit2SHA := gitHeadSHA(t, root)
+
+	// Clear pending, create manifest for the committed AI edit only
+	provenance.ClearPending(paths.GitDir)
+	provenance.WriteManifest(root, paths.GitDir, provenance.Manifest{
+		ID:        "m2",
+		CommitSHA: commit2SHA,
+		Author:    "claude",
+		Timestamp: "2025-01-01T00:01:00Z",
+		Edits: []provenance.ManifestEdit{
+			{
+				File:   "README.md",
+				Lines:  ls2,
+				Change: "AI modified lines 3-5",
+				Tool:   "Edit",
+				Hunk:   &record.HunkInfo{OldStart: 3, OldLines: 3, NewStart: 3, NewLines: 3},
+			},
+		},
+	})
+
+	// ── Step 7: Query all file → AI record shows L3-5, NOT L3-16 (Bug #2) ──
+	_ = os.Remove(paths.IndexDB) // Force rebuild
+	db2 := rebuildTestIndex(t, paths)
+	defer db2.Close()
+
+	allRows2 := queryFileRows(t, db2, "README.md")
+	adjMap := blameAdjustFile(root, "README.md", allRows2)
+
+	for _, row := range allRows2 {
+		if row.CommitSHA != commit2SHA || row.Change != "AI modified lines 3-5" {
+			continue
+		}
+
+		adj := adjMap[row]
+		if adj == nil {
+			t.Fatal("Step 7 FAILED: no adjustment for AI record from commit 2")
+		}
+
+		currentLines := adj.CurrentLines.Lines()
+
+		// AI record MUST show exactly lines 3-5
+		if len(currentLines) != 3 {
+			t.Errorf("Step 7 FAILED (Bug #2): AI record shows %d lines %v, want [3,4,5]",
+				len(currentLines), currentLines)
+		}
+		for _, expected := range []int{3, 4, 5} {
+			if !adj.CurrentLines.Contains(expected) {
+				t.Errorf("Step 7 FAILED (Bug #2): AI line %d missing from currentLines",
+					expected)
+			}
+		}
+
+		// Manual lines 6-16 MUST NOT be attributed to AI
+		for line := 6; line <= 16; line++ {
+			if adj.CurrentLines.Contains(line) {
+				t.Errorf("Step 7 FAILED (Bug #2): manual line %d incorrectly "+
+					"attributed to AI (currentLines=%v)", line, currentLines)
+			}
+		}
 	}
 }

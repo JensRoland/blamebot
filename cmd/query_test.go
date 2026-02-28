@@ -6,6 +6,8 @@ import (
 
 	"github.com/jensroland/git-blamebot/internal/git"
 	"github.com/jensroland/git-blamebot/internal/index"
+	"github.com/jensroland/git-blamebot/internal/linemap"
+	"github.com/jensroland/git-blamebot/internal/lineset"
 )
 
 func TestGroupContiguous(t *testing.T) {
@@ -303,6 +305,67 @@ func TestRegionCenter(t *testing.T) {
 			got := regionCenter(tt.region)
 			if got != tt.expect {
 				t.Errorf("regionCenter(%v) = %f, want %f", tt.region, got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestConstrainBySimulation(t *testing.T) {
+	tests := []struct {
+		name       string
+		sim        *linemap.AdjustedRow
+		blameLines lineset.LineSet
+		expect     string
+	}{
+		{
+			name:       "intersection narrows blame to AI lines only",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(3, 4, 5)},
+			blameLines: lineset.New(3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
+			expect:     "3-5",
+		},
+		{
+			name:       "no intersection falls back to blame lines",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(100, 101)},
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "nil sim returns blame lines",
+			sim:        nil,
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "superseded sim returns blame lines",
+			sim:        &linemap.AdjustedRow{Superseded: true, CurrentLines: lineset.New(3, 4, 5)},
+			blameLines: lineset.New(3, 4, 5, 6, 7),
+			expect:     "3-7",
+		},
+		{
+			name:       "empty sim lines returns blame lines",
+			sim:        &linemap.AdjustedRow{},
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "exact match returns same lines",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(3, 4, 5)},
+			blameLines: lineset.New(3, 4, 5),
+			expect:     "3-5",
+		},
+		{
+			name:       "partial overlap returns intersection",
+			sim:        &linemap.AdjustedRow{CurrentLines: lineset.New(3, 4, 5, 6, 7)},
+			blameLines: lineset.New(5, 6, 7, 8, 9),
+			expect:     "5-7",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := constrainBySimulation(tt.sim, tt.blameLines)
+			if got.String() != tt.expect {
+				t.Errorf("constrainBySimulation = %q, want %q", got.String(), tt.expect)
 			}
 		})
 	}

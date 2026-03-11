@@ -1,0 +1,52 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - main: .
+    binary: git-blamebot
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+brews:
+  - name: git-blamebot
+    repository:
+      owner: jensroland
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/jensroland/git-blamebot"
+    description: "Provenance tracking for AI-authored code"
+    license: "MIT"
+    install: |
+      bin.install "git-blamebot"
+    test: |
+      assert_match version.to_s, shell_output("#{bin}/git-blamebot --version")
+    caveats: |
+      To start tracking AI edits, run:
+        git-blamebot enable --global
